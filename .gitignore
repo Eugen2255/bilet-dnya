@@ -9,6 +9,4 @@ __pycache__/
 node_modules/
 dist/
 data/
-~$*.docx
-/Бизнес-гипотеза Улика.docx
-/Чек лист бизнес гипотеза.docx
+*.[dD][oO][cC][xX]
