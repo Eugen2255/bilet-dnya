@@ -4,8 +4,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /srv/bilet
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt \
-    && useradd --system --no-create-home bilet
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-rus tesseract-ocr-eng \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir -r requirements.txt \
+    && useradd --system --no-create-home bilet \
+    && install -d -m 0700 -o bilet -g bilet /srv/bilet/uploads
 
 COPY app ./app
 USER bilet
