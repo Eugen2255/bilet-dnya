@@ -9,6 +9,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from app.ai.client import ModelError
 from app.ai.grading import Grade, Grader, RubricPoint
+from app.practice import remember_weak_attempt
 
 
 RETRY_DELAYS = (15, 60)
@@ -115,6 +116,8 @@ def _finish(
                 graded_at = clock_timestamp()
             WHERE id = %s
         """, (Jsonb(grade.result), grade.model, grade.prompt_version, attempt_id))
+        if grade.result["score"] < 3:
+            remember_weak_attempt(cursor, attempt_id)
         _enqueue_delivery(cursor, job_id, lease_until, attempt_id, "graded")
         _update_job(cursor, job_id, "done", {"attemptId": str(attempt_id)})
         return "done"

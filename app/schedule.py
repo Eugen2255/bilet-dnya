@@ -8,6 +8,8 @@ from psycopg import Connection, Cursor
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from app.practice import ensure_portion, issue_repeat, start_repeat
+from app.progress import snapshot
 from app.queue import Job, enqueue_delivery
 
 
@@ -44,9 +46,13 @@ def day_window(course: dict, day: date, zone: ZoneInfo) -> DayWindow | None:
 def schedule_courses(connection: Connection, now: datetime) -> None:
     """Persist jobs for the current and next teaching dates."""
     with connection.transaction(), connection.cursor(row_factory=dict_row) as cursor:
+        cursor.execute("""
+            UPDATE repeats AS r SET state = 'closed' FROM courses AS c
+            WHERE r.course_id = c.id AND r.state = 'pending' AND c.state = 'closed'
+        """)
         courses = cursor.execute("""
-            SELECT id, exam_date, timezone, morning_at, evening_at, weekdays, schedule_from
-            FROM courses WHERE state = 'active'
+            SELECT id, exam_date, timezone, morning_at, evening_at, weekdays, schedule_from, state
+            FROM courses WHERE state IN ('active', 'paused')
         """).fetchall()
         for course in courses:
             try:
@@ -55,6 +61,12 @@ def schedule_courses(connection: Connection, now: datetime) -> None:
                 logger.warning("Invalid schedule timezone for course %s", course["id"])
                 continue
             today = now.astimezone(zone).date()
+            if today >= course["exam_date"]:
+                cursor.execute("UPDATE repeats SET state = 'closed' WHERE course_id = %s AND state = 'pending'",
+                               (course["id"],))
+                continue
+            if course["state"] == "paused":
+                continue
             for offset in range(8):
                 day = today + timedelta(days=offset)
                 window = day_window(course, day, zone)
@@ -145,79 +157,58 @@ def delivery_payload(course: dict, day: date, group_day: UUID, expires: datetime
 
 
 def open_day(cursor: Cursor, course: dict, day: date, expires: datetime) -> dict:
+    pending = cursor.execute("""
+        SELECT repeat.id, repeat.ticket_id
+        FROM repeats AS repeat JOIN tickets AS t ON t.id = repeat.ticket_id
+        JOIN rubrics AS r ON r.id = t.approved_rubric_id AND r.state = 'approved'
+        WHERE repeat.course_id = %s AND repeat.member_id IS NULL
+            AND repeat.state = 'pending' AND repeat.due_day <= %s
+        ORDER BY repeat.due_day, repeat.id LIMIT 1
+    """, (course["id"], day)).fetchone()
     ticket = cursor.execute("""
-        SELECT ticket.id, ticket.approved_rubric_id
+        SELECT ticket.id
         FROM tickets AS ticket
         JOIN rubrics AS rubric ON rubric.id = ticket.approved_rubric_id AND rubric.state = 'approved'
         WHERE ticket.course_id = %s
         ORDER BY (SELECT count(*) FROM group_days WHERE ticket_id = ticket.id), ticket.ordinal
         LIMIT 1
-    """, (course["id"],)).fetchone()
-    if ticket is None:
-        return {"skipped": "no_approved_ticket"}
+    """, (course["id"],)).fetchone() if pending is None else None
+    common_id = pending["ticket_id"] if pending else ticket["id"] if ticket else None
 
     row = cursor.execute("""
         INSERT INTO group_days (course_id, day, ticket_id, state)
         VALUES (%s, %s, %s, 'open')
         ON CONFLICT (course_id, day) DO NOTHING
         RETURNING id
-    """, (course["id"], day, ticket["id"])).fetchone()
+    """, (course["id"], day, common_id)).fetchone()
     if row is None:
         return {"skipped": "already_opened"}
 
     group_day = row["id"]
-    new_assignments = cursor.execute("""
-        INSERT INTO assignments (course_id, group_id, member_id, ticket_id, day, kind, rubric_id, state)
-        SELECT %s, group_id, id, %s, %s, 'daily', %s, 'open'
-        FROM memberships
-        WHERE group_id = %s AND role = 'student' AND state = 'active'
-        ON CONFLICT (member_id, ticket_id, day) DO NOTHING
-        RETURNING id, member_id
-    """, (course["id"], ticket["id"], day, ticket["approved_rubric_id"], course["group_id"])).fetchall()
-
+    if pending:
+        issue_repeat(cursor, course, pending["id"], day)
     payload = delivery_payload(course, day, group_day, expires)
-    enqueue_delivery(cursor, f"deliver_morning:{group_day}", "deliver_morning", payload)
-    if new_assignments:
-        rows = cursor.execute("""
-            SELECT member.id, account.dm_chat_id
-            FROM memberships AS member JOIN users AS account ON account.id = member.user_id
-            WHERE member.id = ANY (%s) AND account.dm_chat_id IS NOT NULL
-        """, ([row["member_id"] for row in new_assignments],)).fetchall()
-        private_chats = {row["id"]: row["dm_chat_id"] for row in rows}
-        for assignment in new_assignments:
-            chat_id = private_chats.get(assignment["member_id"])
-            if chat_id is not None:
-                enqueue_delivery(cursor, f"deliver_daily_portion:{assignment['id']}", "deliver_daily_portion", {
-                    **payload,
-                    "chatId": chat_id,
-                    "assignmentId": str(assignment["id"]),
-                    "memberId": str(assignment["member_id"]),
-                })
-    return {"groupDayId": str(group_day), "assignments": len(new_assignments)}
+    if common_id is not None:
+        enqueue_delivery(cursor, f"deliver_morning:{group_day}", "deliver_morning", payload)
+    members = cursor.execute("""
+        SELECT m.id, u.dm_chat_id FROM memberships AS m JOIN users AS u ON u.id = m.user_id
+        WHERE m.group_id = %s AND m.role = 'student' AND m.state = 'active' ORDER BY m.id
+    """, (course["group_id"],)).fetchall()
+    assignments = 0
+    for member in members:
+        plan = ensure_portion(cursor, course, member["id"], day, common_id)
+        if plan is None:
+            continue
+        assignments += plan["assigned_count"]
+        if member["dm_chat_id"] is not None and (plan["assigned_count"] or plan["projected_missing"]):
+            enqueue_delivery(cursor, f"deliver_daily_portion:{group_day}:{member['id']}", "deliver_daily_portion", {
+                **payload, "chatId": member["dm_chat_id"], "memberId": str(member["id"]),
+            })
+    return {"groupDayId": str(group_day), "assignments": assignments}
 
 
 def save_digest(cursor: Cursor, course: dict, day: date, cutoff: datetime, expires: datetime | None) -> dict:
-    stats = cursor.execute("""
-        WITH students AS (
-            SELECT id FROM memberships WHERE group_id = %s AND role = 'student' AND state = 'active'
-        )
-        SELECT (SELECT count(*) FROM students) AS active,
-            count(DISTINCT assignment.member_id) AS responded,
-            count(*) AS graded,
-            round(avg((attempt.result->>'score')::numeric), 2) AS mean_score
-        FROM assignments AS assignment
-        JOIN students ON students.id = assignment.member_id
-        JOIN attempts AS attempt ON attempt.assignment_id = assignment.id
-        WHERE assignment.course_id = %s AND assignment.day = %s AND attempt.status = 'graded'
-            AND attempt.graded_at <= %s AND attempt.result IS NOT NULL
-    """, (course["group_id"], course["id"], day, cutoff)).fetchone()
-    summary = {
-        "asOf": cutoff.isoformat(),
-        "active": stats["active"],
-        "responded": stats["responded"],
-        "graded": stats["graded"],
-        "meanScore": float(stats["mean_score"]) if stats["mean_score"] is not None else None,
-    }
+    summary = snapshot(cursor, course, day, cutoff)
     row = cursor.execute("""
         INSERT INTO group_days (course_id, day, state, summary) VALUES (%s, %s, 'summarized', %s)
         ON CONFLICT (course_id, day) DO UPDATE SET summary = EXCLUDED.summary, state = EXCLUDED.state
@@ -226,6 +217,8 @@ def save_digest(cursor: Cursor, course: dict, day: date, cutoff: datetime, expir
     """, (course["id"], day, Jsonb(summary))).fetchone()
     if row is None:
         return {"skipped": "already_summarized"}
+    for ticket in summary["weakTickets"]:
+        start_repeat(cursor, course, UUID(ticket["id"]), day)
     if expires is not None:
         enqueue_delivery(cursor, f"deliver_digest:{row['id']}", "deliver_digest",
                          delivery_payload(course, day, row["id"], expires))

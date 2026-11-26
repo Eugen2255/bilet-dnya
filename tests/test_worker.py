@@ -101,6 +101,7 @@ class WorkerTests(unittest.TestCase):
         """, (COURSE, DAY)).fetchone()["summary"]
         self.assertEqual(summary, {
             "asOf": EVENING.isoformat(), "active": 2, "responded": 1, "graded": 1, "meanScore": 4.0,
+            "weakTickets": [], "topics": [], "rating": [],
         })
         deliveries = self.db.execute("""
             SELECT type, payload FROM jobs WHERE payload->>'courseId' = %s AND type LIKE 'deliver%%'
