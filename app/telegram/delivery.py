@@ -8,7 +8,7 @@ from psycopg import Cursor
 from app.queue import Job
 from app.schedule import local_time_utc
 from app.telegram.onboarding import issue_join_button
-from app.telegram.study import portion_markup
+from app.telegram.study import portion_forecast, portion_markup
 
 
 @dataclass(frozen=True)
@@ -75,15 +75,34 @@ def scheduled_message(cursor: Cursor, kind: str, payload: dict, username: str) -
         return None
 
     if kind == "deliver_daily_portion":
-        assignment = open_assignment(cursor, UUID(payload["assignmentId"]))
-        if (not assignment or assignment["course_id"] != course_id or assignment["day"] != row["day"]
-                or assignment["dm_chat_id"] != payload.get("chatId")
-                or str(assignment["member_id"]) != payload.get("memberId")):
+        member_id = UUID(payload["memberId"])
+        chat_id = payload.get("chatId")
+        member = cursor.execute("""
+            SELECT 1 FROM memberships AS m JOIN users AS u ON u.id = m.user_id
+            WHERE m.id = %s AND m.group_id = %s AND m.state = 'active' AND m.role = 'student'
+                AND u.dm_chat_id = %s
+        """, (member_id, row["group_id"], chat_id)).fetchone()
+        if not member:
             return None
-        return Outbound({
-            "chat_id": assignment["dm_chat_id"], "text": "Доступна порция на сегодня. Выберите билет.",
-            "reply_markup": portion_markup([assignment]),
-        })
+        assignments = cursor.execute("""
+            SELECT a.id, t.ordinal, t.question FROM assignments AS a
+            JOIN tickets AS t ON t.id = a.ticket_id JOIN rubrics AS r ON r.id = a.rubric_id
+            WHERE a.course_id = %s AND a.member_id = %s AND a.day = %s
+                AND a.state = 'open' AND r.state = 'approved'
+            ORDER BY CASE a.kind WHEN 'repeat' THEN 0 ELSE 1 END, t.ordinal
+        """, (course_id, member_id, row["day"])).fetchall()
+        plan = cursor.execute("""
+            SELECT daily_target, assigned_count, projected_missing FROM daily_portions
+            WHERE course_id = %s AND member_id = %s AND day = %s
+        """, (course_id, member_id, row["day"])).fetchone()
+        forecast = portion_forecast(plan) if plan else ""
+        if not assignments and not forecast:
+            return None
+        text = "Доступна порция на сегодня. Выберите билет." if assignments else "На сегодня пока нет доступных билетов."
+        message = {"chat_id": chat_id, "text": f"{text}\n\n{forecast}" if forecast else text}
+        if assignments:
+            message["reply_markup"] = portion_markup(assignments)
+        return Outbound(message)
 
     chat_id = row["telegram_chat_id"]
     if chat_id != payload.get("chatId"):
@@ -93,15 +112,26 @@ def scheduled_message(cursor: Cursor, kind: str, payload: dict, username: str) -
         button = issue_join_button(cursor, row["group_id"], username, midnight)
         return Outbound({"chat_id": chat_id, "text": f"Билет дня\n\n{row['question']}", "reply_markup": button})
     if kind == "deliver_digest" and row["summary"]:
-        return Outbound({"chat_id": chat_id, "text": format_digest(row["summary"])})
+        consenting = {str(member["id"]) for member in cursor.execute("""
+            SELECT id FROM memberships WHERE group_id = %s AND state = 'active'
+                AND role = 'student' AND rank_opt_in
+        """, (row["group_id"],)).fetchall()}
+        return Outbound({"chat_id": chat_id, "text": format_digest(row["summary"], consenting)})
     return None
 
 
-def format_digest(summary: dict) -> str:
+def format_digest(summary: dict, consenting: set[str]) -> str:
     text = f"Итоги дня\n\nУчастников ответило: {summary['responded']} из {summary['active']}."
     if summary["meanScore"] is None:
         return text + "\nПроверенных ответов пока нет."
-    return text + f"\nПроверено ответов: {summary['graded']}.\nСредний балл: {summary['meanScore']:g}/5."
+    text += f"\nПроверено ответов: {summary['graded']}.\nСредний балл: {summary['meanScore']:g}/5."
+    rating = [row for row in summary.get("rating", []) if row["memberId"] in consenting]
+    if rating:
+        text += "\n\nРейтинг\n" + "\n".join(
+            f"{i}. {row['alias']} · дней: {row['days']} · {row['meanScore']:g}/5"
+            for i, row in enumerate(rating, 1)
+        )
+    return text[:4000]
 
 
 def grade_message(cursor: Cursor, attempt_id: UUID, expected_status: str | None) -> Outbound | None:

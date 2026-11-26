@@ -117,6 +117,10 @@ class StudyFlowTests(unittest.TestCase):
             })
 
     def test_answer_and_result_recovery(self):
+        self.message(STUDENT_CHAT, "/rating on")
+        self.assertIn("может появиться", self.bot.messages[-1]["text"])
+        self.message(STUDENT_CHAT, "/rating off")
+        self.assertIn("скрыт", self.bot.messages[-1]["text"])
         self.scheduled("deliver_morning")
         self.send_all()
         self.assertEqual(self.bot.messages[-1]["chat_id"], GROUP_CHAT)
