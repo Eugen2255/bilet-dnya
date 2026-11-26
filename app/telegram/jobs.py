@@ -4,10 +4,15 @@ from psycopg.types.json import Jsonb
 
 from app.queue import Job
 from app.telegram.api import BotAPI, TelegramError
+from app.telegram.delivery import ready_delivery
 from app.telegram.onboarding import apply_action, parse_command, prepare_action, reply
+from app.telegram.study import handle_study_event, show_today, study_event
 
 
-TELEGRAM_JOB_TYPES = ("telegram_update", "telegram_reply")
+TELEGRAM_JOB_TYPES = (
+    "telegram_update", "telegram_reply", "telegram_callback", "telegram_prompt",
+    "deliver_morning", "deliver_daily_portion", "deliver_digest", "deliver_grade", "deliver_grade_delay",
+)
 MAX_TRIES = 3
 
 
@@ -46,16 +51,19 @@ def handle_update_job(connection: Connection, job: Job, bot: BotAPI) -> str:
         if current is None:
             return "lease_lost"
         update = cursor.execute("""
-            SELECT payload FROM telegram_updates WHERE update_id = %s AND state = 'received'
+            SELECT payload, received_at FROM telegram_updates WHERE update_id = %s AND state = 'received'
         """, (update_id,)).fetchone() if type(update_id) is int else None
 
     command = parse_command(update["payload"]) if update else None
+    event = study_event(update["payload"]) if update and command is None and isinstance(update["payload"], dict) else None
     action, error = None, None
-    if command is not None:
-        try:
+    try:
+        if command is not None:
             action = prepare_action(connection, bot, command)
-        except TelegramError as failure:
-            error = failure
+        elif event and event.addressed_to and event.addressed_to.casefold() != bot.username.casefold():
+            event = None
+    except TelegramError as failure:
+        error = failure
 
     with connection.transaction(), connection.cursor(row_factory=dict_row) as cursor:
         current = leased_job(cursor, job)
@@ -66,10 +74,14 @@ def handle_update_job(connection: Connection, job: Job, bot: BotAPI) -> str:
         if error is not None and error.transient and current["tries"] < MAX_TRIES:
             return defer_job(cursor, job, error)
         if action is not None:
-            apply_action(cursor, update_id, command, action)
+            group = apply_action(cursor, update_id, command, action)
+            if group is not None:
+                show_today(cursor, update_id, command.user_id, command.chat_id, group_id=group)
+        elif event is not None and error is None:
+            handle_study_event(cursor, update_id, event, update["received_at"])
         if error is not None:
-            reply(cursor, update_id, command.chat_id,
-                  "Не удалось проверить права в группе. Попробуйте снова и проверьте, что бот — администратор.")
+            target = command or event
+            reply(cursor, update_id, target.chat_id, "Не удалось обработать запрос. Попробуйте снова позже.")
         cursor.execute("""
             UPDATE telegram_updates SET state = %s, payload = NULL WHERE update_id = %s
         """, ("failed" if error is not None else "processed", update_id))
@@ -78,19 +90,37 @@ def handle_update_job(connection: Connection, job: Job, bot: BotAPI) -> str:
 
 
 def handle_reply_job(connection: Connection, job: Job, bot: BotAPI) -> str:
+    username = ""
+    if job.type == "deliver_morning":
+        try:
+            username = bot.username
+        except TelegramError as failure:
+            with connection.transaction(), connection.cursor(row_factory=dict_row) as cursor:
+                current = leased_job(cursor, job)
+                if current is None:
+                    return "lease_lost"
+                if current["result"] == {"sending": True}:
+                    return finish_job(cursor, job, "delivery_unknown", {}, clear_payload=True)
+                if failure.transient and current["tries"] < MAX_TRIES:
+                    return defer_job(cursor, job, failure)
+                return finish_job(cursor, job, "failed", {"error": failure.code}, clear_payload=True)
     with connection.transaction(), connection.cursor(row_factory=dict_row) as cursor:
         current = leased_job(cursor, job)
         if current is None:
             return "lease_lost"
         if current["result"] == {"sending": True}:
             return finish_job(cursor, job, "delivery_unknown", {}, clear_payload=True)
-        if not isinstance(job.payload, dict) or type(job.payload.get("chat_id")) is not int:
-            return finish_job(cursor, job, "failed", {"error": "INVALID_REPLY"}, clear_payload=True)
+        outbound = ready_delivery(cursor, job, username)
+        if outbound is None:
+            return finish_job(cursor, job, "done", {"skipped": "delivery_unavailable"}, clear_payload=True)
         cursor.execute("UPDATE jobs SET result = %s WHERE id = %s", (Jsonb({"sending": True}), job.id))
 
     message_id, error = None, None
     try:
-        message_id = bot.send(job.payload)
+        if job.type == "telegram_callback":
+            bot.answer_callback(outbound.payload)
+        else:
+            message_id = bot.send(outbound.payload)
     except TelegramError as failure:
         error = failure
 
@@ -99,7 +129,13 @@ def handle_reply_job(connection: Connection, job: Job, bot: BotAPI) -> str:
         if current is None:
             return "lease_lost"
         if error is None:
-            return finish_job(cursor, job, "done", {"messageId": message_id}, clear_payload=True)
+            if outbound.prompt_id is not None:
+                cursor.execute("""
+                    UPDATE assignments SET dm_message_id = %s WHERE id = %s AND state = 'open'
+                        AND dm_message_id IS NULL
+                """, (message_id, outbound.prompt_id))
+            result = {"messageId": message_id} if message_id is not None else {}
+            return finish_job(cursor, job, "done", result, clear_payload=True)
         if error.code == 429 and current["tries"] < MAX_TRIES:
             return defer_job(cursor, job, error)
         state = "delivery_unknown" if error.code != 429 and error.transient else "failed"

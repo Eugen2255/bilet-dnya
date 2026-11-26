@@ -147,7 +147,7 @@ def reply(cursor: Cursor, update_id: int, chat_id: int, text: str, button: dict 
     enqueue_delivery(cursor, f"telegram_reply:{update_id}:{slot}", "telegram_reply", payload)
 
 
-def apply_action(cursor: Cursor, update_id: int, command: Command, action: Action) -> None:
+def apply_action(cursor: Cursor, update_id: int, command: Command, action: Action) -> UUID | None:
     if action.kind == "ignore":
         return
     if action.kind == "reply":
@@ -197,3 +197,5 @@ def apply_action(cursor: Cursor, update_id: int, command: Command, action: Actio
             ON CONFLICT (group_id, user_id) DO UPDATE SET state = 'active'
         """, (link["group_id"], user, f"Участник-{secrets.token_hex(3)}"))
         reply(cursor, update_id, command.chat_id, "Вы подключились к группе.")
+        return link["group_id"]
+    return None

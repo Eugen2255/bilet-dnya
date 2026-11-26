@@ -68,9 +68,9 @@ class GradeJobTests(unittest.TestCase):
                 self.assertEqual((stored["status"], stored["result"]["score"], stored["model"], stored["prompt_version"]),
                                  ("graded", 5, "test", "grade-v1"))
                 count = db.execute("""
-                    SELECT count(*) AS total FROM jobs WHERE type = 'deliver_grade' AND payload = %s
+                    SELECT count(*) AS total FROM jobs WHERE type = 'deliver_grade' AND payload @> %s
                 """, (Jsonb(payload),)).fetchone()["total"]
                 self.assertEqual(count, 2)
             finally:
-                db.execute("DELETE FROM jobs WHERE payload = %s", (Jsonb(payload),))
+                db.execute("DELETE FROM jobs WHERE payload @> %s", (Jsonb(payload),))
                 db.execute("DELETE FROM assignments WHERE id = %s", (assignment,))

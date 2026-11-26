@@ -61,6 +61,9 @@ class BotAPI:
             raise TelegramError()
         return result["message_id"]
 
+    def answer_callback(self, payload: dict) -> None:
+        self.call("answerCallbackQuery", payload)
+
 
 def response_error(payload: object, status: int | None = None) -> TelegramError:
     if not isinstance(payload, dict):

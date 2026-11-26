@@ -103,7 +103,7 @@ def _finish(
                 return "queued"
             if attempt_id is not None:
                 cursor.execute("UPDATE attempts SET status = 'failed' WHERE id = %s", (attempt_id,))
-                _enqueue_delivery(cursor, job_id, lease_until, attempt_id)
+                _enqueue_delivery(cursor, job_id, lease_until, attempt_id, "failed")
             _update_job(cursor, job_id, "failed", {"error": error.code})
             return "failed"
 
@@ -115,7 +115,7 @@ def _finish(
                 graded_at = clock_timestamp()
             WHERE id = %s
         """, (Jsonb(grade.result), grade.model, grade.prompt_version, attempt_id))
-        _enqueue_delivery(cursor, job_id, lease_until, attempt_id)
+        _enqueue_delivery(cursor, job_id, lease_until, attempt_id, "graded")
         _update_job(cursor, job_id, "done", {"attemptId": str(attempt_id)})
         return "done"
 
@@ -129,7 +129,7 @@ def _update_job(cursor, job_id: UUID, state: str, result: dict, delay: int = 0) 
     """, (state, Jsonb(result), state, delay, job_id))
 
 
-def _enqueue_delivery(cursor, grade_job_id: UUID, lease_until: datetime, attempt_id: UUID) -> None:
+def _enqueue_delivery(cursor, grade_job_id: UUID, lease_until: datetime, attempt_id: UUID, status: str) -> None:
     attempt = str(attempt_id)
     cursor.execute("""
         INSERT INTO jobs (key, type, payload)
@@ -137,5 +137,5 @@ def _enqueue_delivery(cursor, grade_job_id: UUID, lease_until: datetime, attempt
         ON CONFLICT (key) DO NOTHING
     """, (
         f"deliver_grade:{grade_job_id}:{lease_until.timestamp()}",
-        Jsonb({"attemptId": attempt}),
+        Jsonb({"attemptId": attempt, "expectedStatus": status}),
     ))
