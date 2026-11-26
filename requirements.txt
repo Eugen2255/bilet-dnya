@@ -1,5 +1,8 @@
+defusedxml==0.7.1
 fastapi==0.120.0
+Pillow==13.0.0
 psycopg[binary]==3.2.13
+pypdfium2==5.15.2
 python-dotenv==1.2.1
 tzdata==2026.6
 uvicorn==0.38.0
