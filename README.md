@@ -60,4 +60,25 @@ python -m venv .venv
 
 ## Работа в команде
 
+### Проверка модели AI-01
+
+В локальном `.env` задайте URL Open WebUI и ключ аккаунта. Для `MODEL_PRIMARY_URL` укажите полный endpoint, например `https://openwebui.example.edu/api/chat/completions`. Если администратор разрешил маршруты с префиксом `/api/v1`, укажите `/api/v1/chat/completions`. Ключ храните в `MODEL_PRIMARY_API_KEY`. [Open WebUI API](https://docs.openwebui.com/reference/api-endpoints/)
+
+Получите доступные ID и укажите нужный в `MODEL_PRIMARY_ID`. Затем прогоните три синтетических ответа. Команды запускаются из корня проекта в Python-окружении с `requirements.txt`.
+
+```sh
+python -m app.ai --list-models
+python -m app.ai correct
+python -m app.ai partial
+python -m app.ai wrong
+```
+
+Для тестов с подставной моделью выполните `python -m unittest discover -s tests`. Чтобы включить проверку очереди, задайте `BILET_TEST_DATABASE_URL` на отдельную тестовую PostgreSQL с миграцией и тестовым курсом.
+
+**Контракт воркера.** Захватите ключ `grade:{attemptId}` с типом `grade` и JSON `{"attemptId":"…"}`, увеличьте `tries` и передайте ID и `lease_until` в `app.ai.jobs.handle_grade_job` вместе с подключением к БД без открытой транзакции. Аренда должна покрывать основной и резервный HTTP-вызовы. Обработчик сохраняет итог и ставит задачу типа `deliver_grade` с полем `attemptId` в одной транзакции. Доставка читает актуальный результат попытки.
+
+Временные сбои возвращают задачу в очередь через 15 и 60 секунд с учётом `Retry-After`. После исчерпания попыток результат отмечается `failed`. Повтор по кнопке должен вернуть то же задание в `queued` и сбросить `tries`. Подключение обработчика к захвату задач и доставка в Telegram входят в CORE-02 и TG-02. Резерв можно задать через `MODEL_FALLBACK_URL`, `MODEL_FALLBACK_ID` и `MODEL_FALLBACK_API_KEY`.
+
+### Ветки и PR
+
 Возьмите задачу из бэклога и назовите ветку по её ID, например `feat/core-01-schema`. В PR укажите ID, как проверить критерии приёмки и какие контракты изменились. Первую миграцию ведёт владелец CORE. Для интеграции используйте тестовый курс, тестовый Telegram-чат и обезличенные ответы. Реальные токены и ключи задаются через локальное окружение или хранилище секретов стенда.
