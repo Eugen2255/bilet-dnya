@@ -56,7 +56,21 @@ docker compose exec -T db sh -c 'exec psql -X -U "$POSTGRES_USER" -d "$POSTGRES_
 | `deliver_daily_portion` | Сообщение в личку при известном `dm_chat_id`. Поля `memberId` и `assignmentId` указывают получателя и назначенный билет. |
 | `deliver_digest` | Публикация из `group_days.summary`. Срез содержит `asOf`, `active`, `responded`, `graded` и `meanScore`. При отсутствии проверенных ответов `meanScore` равен `null`. |
 
-Доставка в Telegram подключается в TG-02. Рейтинг, персональные порции и повторы относятся к CORE-03.
+Доставка билетов, оценок и сводок в Telegram подключается в TG-02. Рейтинг, персональные порции и повторы относятся к CORE-03.
+
+### Подключение тестового Telegram-бота
+
+1. Задайте `TELEGRAM_BOT_TOKEN` и отдельный случайный `TELEGRAM_WEBHOOK_SECRET` в локальном `.env`. Для секрета подойдёт вывод `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
+2. Поднимите API, воркер и PostgreSQL. Примените миграции и опубликуйте API по HTTPS. Команда ниже меняет webhook бота, чей токен задан в `.env`. [Telegram Bot API](https://core.telegram.org/bots/api#setwebhook)
+
+   ```sh
+   python -m app.telegram https://your-host.example/telegram/webhook
+   ```
+
+3. Добавьте бота администратором в тестовую группу. От своего аккаунта администратора отправьте `/bind` или `/bind@имя_бота` и откройте «Подтвердить привязку» в личке. Персональная ссылка действует 15 минут и используется один раз. [Telegram Bot API](https://core.telegram.org/bots/api#getchatmember)
+4. Участник группы открывает «Ответить» и нажимает Start. Ссылка в сообщении о подключении группы действует сутки. При переходе бот проверяет текущее членство и сохраняет ID личного чата. [Telegram Deep Linking](https://core.telegram.org/bots/features#deep-linking)
+
+Webhook сохраняет событие и ставит `telegram_update:{updateId}` в одной транзакции. Воркер обрабатывает событие, ставит ответы в очередь и очищает исходный payload. Для кнопки в утреннем посте TG-02 может использовать `app.telegram.onboarding.issue_join_button`, передав группу, имя бота и срок действия.
 
 Для запуска API через Python 3.12 создайте виртуальное окружение.
 
@@ -90,7 +104,7 @@ python -m app.ai partial
 python -m app.ai wrong
 ```
 
-Для тестов с подставной моделью выполните `python -m unittest discover -s tests`. Чтобы включить проверку очереди, задайте `BILET_TEST_DATABASE_URL` на отдельную тестовую PostgreSQL с миграцией и тестовым курсом.
+Для локальных тестов выполните `python -m unittest discover -s tests`. Чтобы включить проверки очереди и подключения группы с подставным Telegram API, задайте `BILET_TEST_DATABASE_URL` на отдельную тестовую PostgreSQL с миграциями и тестовым курсом.
 
 **Контракт воркера.** Захватите ключ `grade:{attemptId}` с типом `grade` и JSON `{"attemptId":"…"}`, увеличьте `tries` и передайте ID и `lease_until` в `app.ai.jobs.handle_grade_job` вместе с подключением к БД без открытой транзакции. Аренда должна покрывать основной и резервный HTTP-вызовы. Обработчик сохраняет итог и ставит задачу типа `deliver_grade` с полем `attemptId` в одной транзакции. Доставка читает актуальный результат попытки.
 
