@@ -45,4 +45,13 @@ SELECT NOT EXISTS (
     INSERT INTO schema_migrations (version) VALUES ('004_imports');
 \endif
 
+SELECT NOT EXISTS (
+    SELECT FROM schema_migrations WHERE version = '005_rubrics'
+) AS apply_005_rubrics \gset
+
+\if :apply_005_rubrics
+    \ir migrations/005_rubrics.sql
+    INSERT INTO schema_migrations (version) VALUES ('005_rubrics');
+\endif
+
 COMMIT;

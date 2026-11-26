@@ -25,7 +25,7 @@ SYSTEM_PROMPT = """Проверь короткий ответ студента �
 class CompletionClient(Protocol):
     model: str
 
-    def complete(self, messages: list[dict[str, str]]) -> str: ...
+    def complete(self, messages: list[dict[str, str]], *, temperature: float = 0, max_tokens: int = 500) -> str: ...
 
 
 class RubricPoint(BaseModel):

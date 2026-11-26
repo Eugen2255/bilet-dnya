@@ -124,10 +124,10 @@ def read_import(connection: Connection, import_id: UUID, member_id: UUID) -> dic
 
 def lease_is_current(cursor: Cursor, job: Job) -> bool:
     return cursor.execute("""
-        SELECT id FROM jobs WHERE id = %s AND type = 'parse_import' AND state = 'running'
+        SELECT id FROM jobs WHERE id = %s AND type = %s AND state = 'running'
             AND lease_until = %s AND lease_until > clock_timestamp()
         FOR UPDATE
-    """, (job.id, job.lease_until)).fetchone() is not None
+    """, (job.id, job.type, job.lease_until)).fetchone() is not None
 
 
 def finish_job(cursor: Cursor, job: Job, state: str, result: dict) -> str:

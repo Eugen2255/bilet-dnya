@@ -16,6 +16,8 @@ from app.imports.service import (
     IMPORT_JOB_TYPE, IMPORT_LEASE_SECONDS, discard_old_upload_directories, expire_uploads, handle_import_job, storage_path,
 )
 from app.queue import Job, claim_job
+from app.rubrics.generation import handle_index_job, handle_rubric_job
+from app.rubrics.service import INDEX_JOB_TYPE, RUBRIC_JOB_TYPE
 from app.schedule import SCHEDULE_TYPES, handle_schedule_job, schedule_courses
 from app.telegram.api import BotAPI
 from app.telegram.jobs import TELEGRAM_JOB_TYPES, handle_reply_job, handle_update_job
@@ -23,6 +25,7 @@ from app.telegram.jobs import TELEGRAM_JOB_TYPES, handle_reply_job, handle_updat
 
 logger = logging.getLogger(__name__)
 MODEL_CONCURRENCY = 2
+PREPARATION_TYPES = (IMPORT_JOB_TYPE, INDEX_JOB_TYPE, RUBRIC_JOB_TYPE)
 
 
 def open_connection(database_url: str):
@@ -42,16 +45,26 @@ def process_telegram(database_url: str, job: Job, bot: BotAPI) -> None:
             handle_reply_job(connection, job, bot)
 
 
-def process_import(database_url: str, job: Job, storage: Path, grader: Grader | None, slots: BoundedSemaphore) -> None:
+def process_preparation(database_url: str, job: Job, storage: Path, grader: Grader | None, slots: BoundedSemaphore) -> None:
     with open_connection(database_url) as connection:
-        if grader is None:
-            handle_import_job(connection, job, storage)
-        else:
-            def suggest(messages):
+        if job.type == INDEX_JOB_TYPE:
+            handle_index_job(connection, job)
+            return
+        suggest, model = None, None
+        if grader is not None:
+            model = grader.primary.model
+
+            def complete(messages):
                 with slots:
+                    if job.type == RUBRIC_JOB_TYPE:
+                        return grader.primary.complete(messages, temperature=0.2, max_tokens=1000)
                     return grader.primary.complete(messages)
 
-            handle_import_job(connection, job, storage, suggest=suggest, model=grader.primary.model)
+            suggest = complete
+        if job.type == RUBRIC_JOB_TYPE:
+            handle_rubric_job(connection, job, suggest=suggest, model=model)
+        else:
+            handle_import_job(connection, job, storage, suggest=suggest, model=model)
 
 
 def check_task(future: Future, name: str) -> None:
@@ -81,7 +94,7 @@ def run(database_url: str, grader: Grader | None, stop: Event, bot: BotAPI | Non
                             check_task(telegram_pending, "Telegram")
                             telegram_pending = None
                         if import_pending is not None and import_pending.done():
-                            check_task(import_pending, "Import")
+                            check_task(import_pending, "Preparation")
                             import_pending = None
 
                         schedule_courses(connection, datetime.now(timezone.utc))
@@ -102,9 +115,11 @@ def run(database_url: str, grader: Grader | None, stop: Event, bot: BotAPI | Non
                                     break
                                 pending.add(pool.submit(process_grade, database_url, job, grader, slots))
                         if import_pending is None and not pending:
-                            job = claim_job(connection, (IMPORT_JOB_TYPE,), IMPORT_LEASE_SECONDS)
+                            job = claim_job(connection, PREPARATION_TYPES, IMPORT_LEASE_SECONDS)
                             if job is not None:
-                                import_pending = import_pool.submit(process_import, database_url, job, uploads, grader, slots)
+                                import_pending = import_pool.submit(
+                                    process_preparation, database_url, job, uploads, grader, slots,
+                                )
                         if bot is not None and telegram_pending is None:
                             job = claim_job(connection, TELEGRAM_JOB_TYPES, 90)
                             if job is not None:
@@ -131,7 +146,7 @@ def main() -> None:
         except ValueError as exc:
             raise SystemExit(str(exc)) from None
     else:
-        logger.info("Model is unconfigured. Imports use rule-based question extraction.")
+        logger.info("Model is unconfigured. Imports use rules and rubric drafts can be filled manually.")
 
     stop = Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())

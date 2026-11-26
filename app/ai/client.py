@@ -64,12 +64,12 @@ class ChatClient:
             raise ValueError(f"Set {prefix}_URL and {prefix}_ID")
         return cls(url, model, os.getenv(f"{prefix}_API_KEY", "").strip())
 
-    def complete(self, messages: list[dict[str, str]]) -> str:
+    def complete(self, messages: list[dict[str, str]], *, temperature: float = 0, max_tokens: int = 500) -> str:
         payload = self._request_json(self.url, {
             "model": self.model,
             "messages": messages,
-            "temperature": 0,
-            "max_tokens": 500,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
             "stream": False,
         })
         try:
