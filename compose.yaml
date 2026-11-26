@@ -1,10 +1,28 @@
 services:
   api:
+    image: bilet-dnya:local
     build: .
     environment:
       DATABASE_URL: ${DATABASE_URL:?copy .env.example to .env}
     ports:
       - "127.0.0.1:8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  worker:
+    image: bilet-dnya:local
+    build: .
+    command: ["python", "-m", "app.worker"]
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?copy .env.example to .env}
+      MODEL_PRIMARY_URL: ${MODEL_PRIMARY_URL:-}
+      MODEL_PRIMARY_ID: ${MODEL_PRIMARY_ID:-}
+      MODEL_PRIMARY_API_KEY: ${MODEL_PRIMARY_API_KEY:-}
+      MODEL_FALLBACK_URL: ${MODEL_FALLBACK_URL:-}
+      MODEL_FALLBACK_ID: ${MODEL_FALLBACK_ID:-}
+      MODEL_FALLBACK_API_KEY: ${MODEL_FALLBACK_API_KEY:-}
+    stop_grace_period: 45s
     depends_on:
       db:
         condition: service_healthy

@@ -1,4 +1,5 @@
 fastapi==0.120.0
 psycopg[binary]==3.2.13
 python-dotenv==1.2.1
+tzdata==2026.6
 uvicorn==0.38.0

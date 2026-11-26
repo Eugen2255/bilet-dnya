@@ -24,7 +24,7 @@ def handle_grade_job(
 
     with connection.transaction(), connection.cursor(row_factory=dict_row) as cursor:
         job = cursor.execute("""
-            SELECT key, payload FROM jobs
+            SELECT key, payload, tries FROM jobs
             WHERE id = %s AND type = 'grade' AND state = 'running'
                 AND lease_until = %s AND lease_until > clock_timestamp()
         """, (job_id, lease_until)).fetchone()
@@ -46,6 +46,8 @@ def handle_grade_job(
         error = ModelError("INVALID_GRADE_JOB", retryable=False)
     elif attempt and attempt["body"] is not None and attempt["result"] is None:
         try:
+            if job["tries"] > len(RETRY_DELAYS) + 1:
+                raise ModelError("GRADE_ATTEMPTS_EXHAUSTED", retryable=False)
             points = POINTS.validate_python(attempt["points"])
             grade = grader.grade(attempt["question"], attempt["answer"], points, attempt["body"])
         except ValidationError:
@@ -109,7 +111,8 @@ def _finish(
             raise RuntimeError("Missing grade for an active attempt")
 
         cursor.execute("""
-            UPDATE attempts SET status = 'graded', result = %s, model = %s, prompt_version = %s
+            UPDATE attempts SET status = 'graded', result = %s, model = %s, prompt_version = %s,
+                graded_at = clock_timestamp()
             WHERE id = %s
         """, (Jsonb(grade.result), grade.model, grade.prompt_version, attempt_id))
         _enqueue_delivery(cursor, job_id, lease_until, attempt_id)
