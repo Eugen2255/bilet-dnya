@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 from psycopg import Cursor
 
+from app.ai.digest import visible_note
 from app.queue import Job
 from app.reviews import APPEAL_WINDOW
 from app.schedule import local_time_utc
@@ -76,7 +77,7 @@ def scheduled_message(cursor: Cursor, kind: str, payload: dict, username: str) -
         return None
     course_id, group_day_id = UUID(payload["courseId"]), UUID(payload["groupDayId"])
     row = cursor.execute("""
-        SELECT d.day, d.summary, c.group_id, c.timezone, g.telegram_chat_id, t.question, r.state AS rubric_state
+        SELECT d.day, d.summary, d.digest_note, c.group_id, c.timezone, g.telegram_chat_id, t.question, r.state AS rubric_state
         FROM group_days AS d JOIN courses AS c ON c.id = d.course_id
         JOIN study_groups AS g ON g.id = c.group_id
         LEFT JOIN tickets AS t ON t.id = d.ticket_id
@@ -129,15 +130,18 @@ def scheduled_message(cursor: Cursor, kind: str, payload: dict, username: str) -
             SELECT id FROM memberships WHERE group_id = %s AND state = 'active'
                 AND role = 'student' AND rank_opt_in
         """, (row["group_id"],)).fetchall()}
-        return Outbound({"chat_id": chat_id, "text": format_digest(row["summary"], consenting)})
+        commentary = visible_note(cursor, row["digest_note"])
+        return Outbound({"chat_id": chat_id, "text": format_digest(row["summary"], consenting, commentary)})
     return None
 
 
-def format_digest(summary: dict, consenting: set[str]) -> str:
+def format_digest(summary: dict, consenting: set[str], note: str = "") -> str:
     text = f"Итоги дня\n\nУчастников ответило: {summary['responded']} из {summary['active']}."
     if summary["meanScore"] is None:
         return text + "\nПроверенных ответов пока нет."
     text += f"\nПроверено ответов: {summary['graded']}.\nСредний балл: {summary['meanScore']:g}/5."
+    if note:
+        text += "\n\n" + note
     rating = [row for row in summary.get("rating", []) if row["memberId"] in consenting]
     if rating:
         text += "\n\nРейтинг\n" + "\n".join(

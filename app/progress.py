@@ -8,7 +8,8 @@ from psycopg import Cursor
 
 def day_grades(cursor: Cursor, course_id: UUID, day: date, cutoff: datetime) -> list[dict]:
     return cursor.execute("""
-        SELECT a.member_id, a.ticket_id, t.question, COALESCE(review.result, p.result) AS result, r.points
+        SELECT a.member_id, a.ticket_id, t.question, COALESCE(review.result, p.result) AS result,
+            r.id AS rubric_id, r.points
         FROM assignments AS a JOIN memberships AS m ON m.id = a.member_id
         JOIN attempts AS p ON p.assignment_id = a.id
         LEFT JOIN appeals AS review ON review.attempt_id = p.id AND review.reviewed_at <= %s
@@ -31,16 +32,20 @@ def group_stats(grades: list[dict]) -> tuple[list[dict], list[dict]]:
         if len(rows) < 3:
             continue
         missing = Counter()
-        errors = 0
+        errors = error_answers = 0
         for row in rows:
             keys = set(row["result"].get("missingIds", []))
             missing.update({point["text"] for point in row["points"] if point["id"] in keys})
-            errors += row["result"].get("errorCount", len(row["result"].get("errors", [])))
+            count = row["result"].get("errorCount", len(row["result"].get("errors") or []))
+            errors += count
+            error_answers += count > 0
         topics.append({
             "question": rows[0]["question"],
             "answers": len(rows),
+            "rubricIds": sorted({str(row["rubric_id"]) for row in rows}),
             "missingPoints": [{"label": text, "count": count} for text, count in missing.most_common() if count >= 3],
             "factualErrorCount": errors,
+            "factualErrorAnswers": error_answers,
         })
     return weak, topics
 

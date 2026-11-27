@@ -8,6 +8,7 @@ from psycopg import Connection, Cursor
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from app.ai.digest import PUBLICATION_BUDGET, enqueue_digest
 from app.practice import ensure_portion, issue_repeat, start_repeat
 from app.progress import snapshot
 from app.queue import Job, enqueue_delivery
@@ -83,7 +84,7 @@ def schedule_courses(connection: Connection, now: datetime) -> None:
                     break
 
 
-def handle_schedule_job(connection: Connection, job: Job, now: datetime) -> str:
+def handle_schedule_job(connection: Connection, job: Job, now: datetime, *, digest_model: bool = False) -> str:
     with connection.transaction(), connection.cursor(row_factory=dict_row) as cursor:
         current = cursor.execute("""
             SELECT id FROM jobs WHERE id = %s AND state = 'running'
@@ -135,7 +136,7 @@ def handle_schedule_job(connection: Connection, job: Job, now: datetime) -> str:
         if job.type == "morning":
             result = open_day(cursor, course, day, expires)
         else:
-            result = save_digest(cursor, course, day, due, expires if now < expires else None)
+            result = save_digest(cursor, course, day, due, expires if now < expires else None, use_model=digest_model)
         return finish_schedule(cursor, job, result)
 
 
@@ -207,7 +208,9 @@ def open_day(cursor: Cursor, course: dict, day: date, expires: datetime) -> dict
     return {"groupDayId": str(group_day), "assignments": assignments}
 
 
-def save_digest(cursor: Cursor, course: dict, day: date, cutoff: datetime, expires: datetime | None) -> dict:
+def save_digest(
+    cursor: Cursor, course: dict, day: date, cutoff: datetime, expires: datetime | None, *, use_model: bool = False,
+) -> dict:
     summary = snapshot(cursor, course, day, cutoff)
     row = cursor.execute("""
         INSERT INTO group_days (course_id, day, state, summary) VALUES (%s, %s, 'summarized', %s)
@@ -220,6 +223,6 @@ def save_digest(cursor: Cursor, course: dict, day: date, cutoff: datetime, expir
     for ticket in summary["weakTickets"]:
         start_repeat(cursor, course, UUID(ticket["id"]), day)
     if expires is not None:
-        enqueue_delivery(cursor, f"deliver_digest:{row['id']}", "deliver_digest",
-                         delivery_payload(course, day, row["id"], expires))
+        enqueue_digest(cursor, summary, delivery_payload(course, day, row["id"], expires),
+                       min(expires, cutoff + PUBLICATION_BUDGET), use_model=use_model)
     return {"groupDayId": str(row["id"])}

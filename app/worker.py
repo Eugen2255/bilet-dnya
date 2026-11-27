@@ -13,6 +13,7 @@ import psycopg
 from dotenv import load_dotenv
 
 from app.ai.client import ChatClient
+from app.ai.digest import DIGEST_JOB_TYPE, handle_digest_note_job
 from app.ai.grading import Grader
 from app.ai.jobs import handle_appeal_job, handle_grade_job
 from app.imports.service import (
@@ -59,6 +60,10 @@ def process_telegram(database_url: str, job: Job, bot: BotAPI, stop: Event) -> N
 
 def process_preparation(database_url: str, job: Job, storage: Path, grader: Grader | None, slots: BoundedSemaphore) -> None:
     with open_connection(database_url) as connection:
+        if job.type == DIGEST_JOB_TYPE:
+            with slots:
+                handle_digest_note_job(connection, job, grader.primary if grader else None)
+            return
         if job.type == INDEX_JOB_TYPE:
             handle_index_job(connection, job)
             return
@@ -139,7 +144,7 @@ def run(
                             job = claim_job(connection, SCHEDULE_TYPES, 30)
                             if job is None:
                                 break
-                            handle_schedule_job(connection, job, datetime.now(timezone.utc))
+                            handle_schedule_job(connection, job, datetime.now(timezone.utc), digest_model=grader is not None)
 
                         if graders:
                             while len(pending) < MODEL_CONCURRENCY:
@@ -148,7 +153,8 @@ def run(
                                     break
                                 pending.add(pool.submit(process_grade, database_url, job, graders[job.type], slots))
                         if import_pending is None and not pending:
-                            job = claim_job(connection, PREPARATION_TYPES, IMPORT_LEASE_SECONDS)
+                            job = (claim_job(connection, (DIGEST_JOB_TYPE,), 30)
+                                   or claim_job(connection, PREPARATION_TYPES, IMPORT_LEASE_SECONDS))
                             if job is not None:
                                 import_pending = import_pool.submit(
                                     process_preparation, database_url, job, uploads, grader, slots,
