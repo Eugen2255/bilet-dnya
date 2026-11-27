@@ -1,0 +1,3 @@
+A primary key identifies a row.
+A primary key is unique.
+A primary key cannot contain NULL.
