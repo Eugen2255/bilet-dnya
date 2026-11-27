@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 from psycopg import Cursor
 
 from app.queue import Job
+from app.reviews import APPEAL_WINDOW
 from app.schedule import local_time_utc
 from app.telegram.onboarding import issue_join_button
 from app.telegram.study import portion_forecast, portion_markup
@@ -136,11 +137,13 @@ def format_digest(summary: dict, consenting: set[str]) -> str:
 
 def grade_message(cursor: Cursor, attempt_id: UUID, expected_status: str | None) -> Outbound | None:
     row = cursor.execute("""
-        SELECT p.status, p.result, p.body IS NOT NULL AS can_retry, u.dm_chat_id, t.ordinal,
-            r.answer, r.points, r.state AS rubric_state
+        SELECT p.status, COALESCE(appeal.result, p.result) AS result, p.body IS NOT NULL AS can_retry,
+            u.dm_chat_id, t.ordinal, m.role, p.graded_at, appeal.state AS appeal_state,
+            r.answer, r.points, r.state AS rubric_state, statement_timestamp() AS read_at
         FROM attempts AS p JOIN assignments AS a ON a.id = p.assignment_id
         JOIN memberships AS m ON m.id = a.member_id JOIN users AS u ON u.id = m.user_id
         JOIN tickets AS t ON t.id = a.ticket_id JOIN rubrics AS r ON r.id = a.rubric_id
+        LEFT JOIN appeals AS appeal ON appeal.attempt_id = p.id
         WHERE p.id = %s AND m.state = 'active' AND u.dm_chat_id IS NOT NULL
     """, (attempt_id,)).fetchone()
     if not row or (expected_status and expected_status != row["status"]):
@@ -155,7 +158,21 @@ def grade_message(cursor: Cursor, attempt_id: UUID, expected_status: str | None)
                 {"text": "Повторить проверку", "callback_data": f"retry:{attempt_id}"}
             ]]}
     elif row["status"] == "graded" and isinstance(row["result"], dict):
-        payload["text"] = format_grade(row)
+        heading = {
+            "queued": "Апелляция на проверке.",
+            "succeeded": "Апелляция рассмотрена. Действующая оценка ниже.",
+            "failed": "Повторная проверка завершилась с ошибкой. Исходная оценка сохранена.",
+        }.get(row["appeal_state"])
+        payload["text"] = "\n\n".join(filter(None, (heading, format_grade(row))))[:4000]
+        if row["role"] == "student":
+            buttons = []
+            if (not row["appeal_state"] and row["can_retry"] and row["graded_at"]
+                    and row["graded_at"] <= row["read_at"] <= row["graded_at"] + APPEAL_WINDOW):
+                buttons.append([{"text": "Оспорить оценку", "callback_data": f"appeal:{attempt_id}"}])
+            if row["rubric_state"] == "approved":
+                buttons.append([{"text": "Пожаловаться на эталон", "callback_data": f"report:{attempt_id}"}])
+            if buttons:
+                payload["reply_markup"] = {"inline_keyboard": buttons}
     else:
         return None
     return Outbound(payload)
@@ -164,6 +181,8 @@ def grade_message(cursor: Cursor, attempt_id: UUID, expected_status: str | None)
 def format_grade(row: dict) -> str:
     result = row["result"]
     lines = [f"Билет {row['ordinal']}. Оценка {result['score']}/5"]
+    if row["rubric_state"] == "revoked":
+        return lines[0] + "\n\nЭталон проверяет преподаватель. Доступные билеты — /today."
     points = {point["id"]: point["text"] for point in row["points"]}
     for title, field in (("Засчитано", "coveredIds"), ("Упущено", "missingIds")):
         entries = [points[point_id] for point_id in result.get(field, []) if point_id in points]

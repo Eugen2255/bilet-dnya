@@ -329,7 +329,11 @@ function questionEditor(result, done) {
 function rubricEditor(ticket, refresh) {
     const saved = ticket.rubric;
     const detail = make("details", "", make("summary", "", ticket.question));
-    const label = ticket.approvedVersion ? "Утверждена версия " + ticket.approvedVersion : "Ожидает утверждения";
+    let label = "Ожидает утверждения";
+    if (ticket.reviewRequired)
+        label = "Эталон отозван по жалобам · утвердите новую версию";
+    else if (ticket.approvedVersion)
+        label = "Утверждена версия " + ticket.approvedVersion;
     detail.append(make("p", "muted", label + (saved?.sourceStatus === "unsourced" ? " · есть пункты без источника" : "")));
     const answer = textarea(saved?.answer || "", 4);
     answer.maxLength = 10000;

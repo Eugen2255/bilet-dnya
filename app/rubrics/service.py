@@ -10,6 +10,7 @@ from app.imports.documents import clean_text
 from app.imports.errors import ImportProblem
 from app.imports.questions import MAX_QUESTIONS, MAX_QUESTION_CHARS
 from app.queue import enqueue_delivery
+from app.reviews import reopen_revoked_assignments
 from app.rubrics.drafts import apply_citations, normalize_rubric
 
 
@@ -86,7 +87,8 @@ def list_tickets(connection: Connection, course_id: UUID, member_id: UUID) -> di
         if not visible:
             return None
         rows = cursor.execute("""
-            SELECT t.id, t.question, latest.version, latest.state, latest.answer, latest.points, latest.source_status,
+            SELECT t.id, t.question, t.state = 'revoked' AS review_required,
+                latest.version, latest.state, latest.answer, latest.points, latest.source_status,
                 approved.version AS approved_version
             FROM tickets AS t
             LEFT JOIN LATERAL (
@@ -99,6 +101,7 @@ def list_tickets(connection: Connection, course_id: UUID, member_id: UUID) -> di
     return {"items": [{
         "id": str(row["id"]), "question": row["question"], "version": row["version"] or 0,
         "status": row["state"] or "draft", "approvedVersion": row["approved_version"],
+        "reviewRequired": row["review_required"],
         "rubric": {"answer": row["answer"], "sourceStatus": row["source_status"], "points": row["points"]}
         if row["version"] else None,
     } for row in rows]}
@@ -128,7 +131,7 @@ def update_rubric(
             SELECT t.course_id, c.state, m.user_id FROM tickets AS t JOIN courses AS c ON c.id = t.course_id
             JOIN memberships AS m ON m.group_id = c.group_id
             WHERE t.id = %s AND m.id = %s AND m.state = 'active' AND m.role IN ('organizer', 'teacher')
-            FOR UPDATE OF t
+            FOR NO KEY UPDATE OF t
         """, (ticket_id, member_id)).fetchone()
         if ticket is None:
             raise ImportProblem("NOT_FOUND", "Билет недоступен.")
@@ -163,4 +166,5 @@ def update_rubric(
         if approve:
             cursor.execute("UPDATE tickets SET approved_rubric_id = %s, state = 'approved' WHERE id = %s",
                            (rubric, ticket_id))
+            reopen_revoked_assignments(cursor, ticket_id, rubric)
     return {"version": version, "status": status, "sourceStatus": source_status}

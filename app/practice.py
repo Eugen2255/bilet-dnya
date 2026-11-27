@@ -93,10 +93,14 @@ def ensure_portion(cursor: Cursor, course: dict, member_id: UUID, day: date, com
     if saved:
         return saved
 
+    approved = cursor.execute("""
+        SELECT r.id FROM tickets AS t JOIN rubrics AS r ON r.id = t.approved_rubric_id
+        WHERE t.course_id = %s AND r.state = 'approved' ORDER BY r.id FOR SHARE OF r
+    """, (course["id"],)).fetchall()
     rows = cursor.execute("""
         SELECT t.id, t.ordinal, r.id AS rubric_id, COALESCE(MAX(progress.passes), 0) AS passes
         FROM tickets AS t
-        LEFT JOIN rubrics AS r ON r.id = t.approved_rubric_id AND r.state = 'approved'
+        LEFT JOIN rubrics AS r ON r.id = t.approved_rubric_id AND r.id = ANY (%s)
         LEFT JOIN (
             SELECT a.ticket_id, count(DISTINCT a.day) AS passes
             FROM assignments AS a JOIN attempts AS p ON p.assignment_id = a.id
@@ -104,7 +108,7 @@ def ensure_portion(cursor: Cursor, course: dict, member_id: UUID, day: date, com
             GROUP BY a.ticket_id
         ) AS progress ON progress.ticket_id = t.id
         WHERE t.course_id = %s GROUP BY t.id, r.id ORDER BY t.ordinal
-    """, (course["id"], member_id, day, course["id"])).fetchall()
+    """, ([row["id"] for row in approved], course["id"], member_id, day, course["id"])).fetchall()
     tickets = [TicketProgress(**row) for row in rows]
     due = cursor.execute("""
         SELECT id, ticket_id FROM repeats
@@ -167,11 +171,54 @@ def issue_repeat(cursor: Cursor, course: dict, repeat_id: UUID, day: date) -> No
 
 
 def remember_weak_attempt(cursor: Cursor, attempt_id: UUID) -> None:
-    row = cursor.execute("""
+    row = lock_repeat_context(cursor, attempt_id)
+    if row is None:
+        return
+    start_repeat(cursor, row, row["ticket_id"], row["day"], member_id=row["member_id"], attempt_id=attempt_id)
+    cursor.execute("""
+        INSERT INTO personal_repeat_evidence (first_repeat_id, attempt_id)
+        SELECT first.id, %s FROM repeats AS pending
+        JOIN repeats AS first ON first.chain_id = pending.chain_id AND first.step = 1
+        WHERE pending.ticket_id = %s AND pending.member_id = %s AND pending.state = 'pending'
+        ON CONFLICT DO NOTHING
+    """, (attempt_id, row["ticket_id"], row["member_id"]))
+
+
+def reconsider_personal_repeat(cursor: Cursor, attempt_id: UUID, previous: int, score: int) -> None:
+    if previous >= 3 and score < 3:
+        remember_weak_attempt(cursor, attempt_id)
+    if previous >= 3 or score < 3:
+        return
+    row = lock_repeat_context(cursor, attempt_id)
+    if row is None:
+        return
+    pending = cursor.execute("""
+        SELECT id, chain_id FROM repeats WHERE ticket_id = %s AND member_id = %s
+            AND origin_attempt_id = %s AND state = 'pending'
+    """, (row["ticket_id"], row["member_id"], attempt_id)).fetchone()
+    if pending is None:
+        return
+    other = cursor.execute("""
+        SELECT p.id FROM repeats AS first
+        JOIN personal_repeat_evidence AS evidence ON evidence.first_repeat_id = first.id
+        JOIN attempts AS p ON p.id = evidence.attempt_id
+        LEFT JOIN appeals AS appeal ON appeal.attempt_id = p.id
+        WHERE first.chain_id = %s AND first.step = 1 AND p.id <> %s AND p.status = 'graded'
+            AND (COALESCE(appeal.result, p.result)->>'score')::int < 3
+        ORDER BY p.graded_at, p.id LIMIT 1
+    """, (pending["chain_id"], attempt_id)).fetchone()
+    if other:
+        cursor.execute("UPDATE repeats SET origin_attempt_id = %s WHERE id = %s", (other["id"], pending["id"]))
+    else:
+        cursor.execute("UPDATE repeats SET state = 'closed' WHERE id = %s", (pending["id"],))
+
+
+def lock_repeat_context(cursor: Cursor, attempt_id: UUID) -> dict | None:
+    return cursor.execute("""
         SELECT c.id, c.group_id, c.weekdays, c.exam_date, a.day, a.ticket_id, a.member_id
         FROM attempts AS p JOIN assignments AS a ON a.id = p.assignment_id
         JOIN courses AS c ON c.id = a.course_id
+        JOIN memberships AS m ON m.id = a.member_id
         WHERE p.id = %s AND c.state IN ('active', 'paused')
+        FOR NO KEY UPDATE OF m
     """, (attempt_id,)).fetchone()
-    if row is not None:
-        start_repeat(cursor, row, row["ticket_id"], row["day"], member_id=row["member_id"], attempt_id=attempt_id)

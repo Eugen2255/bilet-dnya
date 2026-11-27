@@ -8,6 +8,7 @@ from psycopg.types.json import Jsonb
 
 from app.practice import ensure_portion
 from app.queue import enqueue_delivery
+from app.reviews import report_rubric, request_appeal
 from app.telegram.onboarding import mini_app_button, reply
 
 
@@ -113,6 +114,8 @@ def show_today(
         and row["rubric_state"] == "approved" and row["attempt_id"] is None
     ]
     ready = [row["attempt_id"] for row in assignments if row["attempt_status"] in {"graded", "failed"}]
+    if any(row["rubric_state"] == "revoked" and row["attempt_id"] is None for row in assignments):
+        forecasts.append("Эталон одного из билетов проверяет преподаватель.")
     if not assignments and group_id is None:
         previous = cursor.execute("""
             SELECT p.id FROM attempts AS p JOIN assignments AS a ON a.id = p.assignment_id
@@ -144,16 +147,19 @@ def accept_answer(cursor: Cursor, update_id: int, event: StudyEvent, received_at
         reply(cursor, update_id, event.chat_id, "Выберите билет через /today и ответьте текстом до 1000 знаков.")
         return
     assignment = cursor.execute("""
-        SELECT a.id, a.state FROM assignments AS a JOIN courses AS c ON c.id = a.course_id
+        SELECT a.id, a.state, r.state AS rubric_state FROM assignments AS a JOIN courses AS c ON c.id = a.course_id
         JOIN memberships AS m ON m.id = a.member_id JOIN users AS u ON u.id = m.user_id
         JOIN rubrics AS r ON r.id = a.rubric_id
         WHERE u.telegram_user_id = %s AND u.dm_chat_id = %s AND m.state = 'active'
-            AND a.dm_message_id = %s AND c.state IN ('active', 'paused') AND r.state = 'approved'
+            AND a.dm_message_id = %s AND c.state IN ('active', 'paused')
             AND a.day = (%s::timestamptz AT TIME ZONE c.timezone)::date
         ORDER BY a.id LIMIT 1 FOR NO KEY UPDATE OF a
     """, (event.user_id, event.chat_id, event.message_id, received_at)).fetchone()
     if assignment is None:
         reply(cursor, update_id, event.chat_id, "Задание недоступно. Откройте текущую порцию через /today.")
+        return
+    if assignment["state"] == "revoked" or assignment["rubric_state"] != "approved":
+        reply(cursor, update_id, event.chat_id, "Эталон проверяет преподаватель. Выберите доступный билет через /today.")
         return
     if assignment["state"] != "open":
         reply(cursor, update_id, event.chat_id, "Ответ на этот билет уже принят. Результат доступен через /today.")
@@ -177,14 +183,18 @@ def accept_answer(cursor: Cursor, update_id: int, event: StudyEvent, received_at
 
 def choose_ticket(cursor: Cursor, event: StudyEvent, assignment_id: UUID) -> str:
     row = cursor.execute("""
-        SELECT a.dm_message_id FROM assignments AS a JOIN courses AS c ON c.id = a.course_id
+        SELECT a.dm_message_id, a.state, r.state AS rubric_state FROM assignments AS a JOIN courses AS c ON c.id = a.course_id
         JOIN memberships AS m ON m.id = a.member_id JOIN users AS u ON u.id = m.user_id
         JOIN rubrics AS r ON r.id = a.rubric_id
         WHERE a.id = %s AND u.telegram_user_id = %s AND u.dm_chat_id = %s AND m.state = 'active'
-            AND a.state = 'open' AND c.state = 'active' AND r.state = 'approved'
+            AND c.state = 'active'
             AND a.day = (statement_timestamp() AT TIME ZONE c.timezone)::date
     """, (assignment_id, event.user_id, event.chat_id)).fetchone()
     if row is None:
+        return "Этот билет сейчас недоступен."
+    if row["state"] == "revoked" or row["rubric_state"] != "approved":
+        return "Эталон проверяет преподаватель. Выберите доступный билет через /today."
+    if row["state"] != "open":
         return "Этот билет сейчас недоступен."
     if row["dm_message_id"] is not None:
         return "Ответьте на сообщение бота с этим билетом."
@@ -244,6 +254,10 @@ def handle_study_event(cursor: Cursor, update_id: int, event: StudyEvent, receiv
             message = choose_ticket(cursor, event, target)
         elif target is not None and kind == "retry":
             message = retry_grade(cursor, event, target)
+        elif target is not None and kind == "appeal":
+            message = request_appeal(cursor, target, event.user_id, event.chat_id, received_at)
+        elif target is not None and kind == "report":
+            message = report_rubric(cursor, target, event.user_id, event.chat_id, received_at)
         enqueue_delivery(cursor, f"telegram_callback:{update_id}", "telegram_callback",
                          {"callback_query_id": event.callback_id, "text": message})
 

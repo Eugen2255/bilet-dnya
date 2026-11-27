@@ -2,6 +2,7 @@ import logging
 import os
 import signal
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import BoundedSemaphore, Event
@@ -10,8 +11,9 @@ from time import monotonic
 import psycopg
 from dotenv import load_dotenv
 
+from app.ai.client import ChatClient
 from app.ai.grading import Grader
-from app.ai.jobs import handle_grade_job
+from app.ai.jobs import handle_appeal_job, handle_grade_job
 from app.imports.service import (
     IMPORT_JOB_TYPE, IMPORT_LEASE_SECONDS, discard_old_upload_directories, expire_uploads, handle_import_job, storage_path,
 )
@@ -34,7 +36,8 @@ def open_connection(database_url: str):
 
 def process_grade(database_url: str, job: Job, grader: Grader, slots: BoundedSemaphore) -> None:
     with slots, open_connection(database_url) as connection:
-        handle_grade_job(connection, job.id, job.lease_until, grader)
+        handler = handle_appeal_job if job.type == "appeal" else handle_grade_job
+        handler(connection, job.id, job.lease_until, grader)
 
 
 def process_telegram(database_url: str, job: Job, bot: BotAPI) -> None:
@@ -72,7 +75,12 @@ def check_task(future: Future, name: str) -> None:
         logger.error("%s handler failed (%s). Lease will expire.", name, type(error).__name__)
 
 
-def run(database_url: str, grader: Grader | None, stop: Event, bot: BotAPI | None = None) -> None:
+def run(
+    database_url: str, grader: Grader | None, stop: Event, bot: BotAPI | None = None, *, reviewer: Grader | None = None,
+) -> None:
+    if reviewer is None and grader is not None:
+        reviewer = Grader(grader.primary)
+    graders = {kind: model for kind, model in (("grade", grader), ("appeal", reviewer)) if model is not None}
     pending = set()
     telegram_pending = None
     import_pending = None
@@ -108,12 +116,12 @@ def run(database_url: str, grader: Grader | None, stop: Event, bot: BotAPI | Non
                                 break
                             handle_schedule_job(connection, job, datetime.now(timezone.utc))
 
-                        if grader is not None:
+                        if graders:
                             while len(pending) < MODEL_CONCURRENCY:
-                                job = claim_job(connection, ("grade",), 90)
+                                job = claim_job(connection, tuple(graders), 90)
                                 if job is None:
                                     break
-                                pending.add(pool.submit(process_grade, database_url, job, grader, slots))
+                                pending.add(pool.submit(process_grade, database_url, job, graders[job.type], slots))
                         if import_pending is None and not pending:
                             job = claim_job(connection, PREPARATION_TYPES, IMPORT_LEASE_SECONDS)
                             if job is not None:
@@ -139,10 +147,12 @@ def main() -> None:
     database_url = os.getenv("DATABASE_URL")
     if not database_url:
         raise SystemExit("Set DATABASE_URL")
-    grader = None
+    grader = reviewer = None
     if os.getenv("MODEL_PRIMARY_URL") or os.getenv("MODEL_PRIMARY_ID"):
         try:
             grader = Grader.from_env()
+            if review_model := os.getenv("MODEL_REVIEW_ID", "").strip():
+                reviewer = Grader(replace(ChatClient.from_env(), model=review_model))
         except ValueError as exc:
             raise SystemExit(str(exc)) from None
     else:
@@ -152,7 +162,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     signal.signal(signal.SIGINT, lambda *_: stop.set())
     token = os.getenv("TELEGRAM_BOT_TOKEN")
-    run(database_url, grader, stop, BotAPI(token) if token else None)
+    run(database_url, grader, stop, BotAPI(token) if token else None, reviewer=reviewer)
 
 
 if __name__ == "__main__":

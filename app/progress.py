@@ -1,5 +1,5 @@
 from collections import Counter, defaultdict
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -8,14 +8,15 @@ from psycopg import Cursor
 
 def day_grades(cursor: Cursor, course_id: UUID, day: date, cutoff: datetime) -> list[dict]:
     return cursor.execute("""
-        SELECT a.member_id, a.ticket_id, t.question, p.result, r.points
+        SELECT a.member_id, a.ticket_id, t.question, COALESCE(review.result, p.result) AS result, r.points
         FROM assignments AS a JOIN memberships AS m ON m.id = a.member_id
         JOIN attempts AS p ON p.assignment_id = a.id
+        LEFT JOIN appeals AS review ON review.attempt_id = p.id AND review.reviewed_at <= %s
         JOIN tickets AS t ON t.id = a.ticket_id JOIN rubrics AS r ON r.id = a.rubric_id
         WHERE a.course_id = %s AND a.day = %s AND m.role = 'student' AND m.state = 'active'
             AND p.status = 'graded' AND p.graded_at <= %s AND p.result IS NOT NULL
         ORDER BY t.ordinal, a.member_id
-    """, (course_id, day, cutoff)).fetchall()
+    """, (cutoff, course_id, day, cutoff)).fetchall()
 
 
 def group_stats(grades: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -55,14 +56,15 @@ def snapshot(cursor: Cursor, course: dict, day: date, cutoff: datetime) -> dict:
     weak, topics = group_stats(grades)
     ranks = cursor.execute("""
         SELECT m.id, m.alias, count(DISTINCT a.day) AS days,
-            avg((p.result->>'score')::numeric) AS mean_score
+            avg((COALESCE(review.result, p.result)->>'score')::numeric) AS mean_score
         FROM memberships AS m JOIN assignments AS a ON a.member_id = m.id
         JOIN attempts AS p ON p.assignment_id = a.id
+        LEFT JOIN appeals AS review ON review.attempt_id = p.id AND review.reviewed_at <= %s
         WHERE a.course_id = %s AND a.day <= %s AND m.state = 'active'
             AND m.role = 'student' AND m.rank_opt_in
             AND p.status = 'graded' AND p.graded_at <= %s AND p.result IS NOT NULL
         GROUP BY m.id ORDER BY days DESC, mean_score DESC, m.alias, m.id
-    """, (course["id"], day, cutoff)).fetchall()
+    """, (cutoff, course["id"], day, cutoff)).fetchall()
     return {
         "asOf": cutoff.isoformat(),
         "active": active_students(cursor, course["group_id"]),
@@ -99,21 +101,22 @@ def read_dashboard(
 ) -> dict | None:
     """Read the caller's progress. Editors additionally receive group totals for this course."""
     course = cursor.execute("""
-        SELECT c.group_id, c.timezone, c.exam_date, c.weekdays, m.role
+        SELECT c.group_id, c.timezone, c.exam_date, c.weekdays, m.role, statement_timestamp() AS read_at
         FROM courses AS c JOIN memberships AS m ON m.group_id = c.group_id
         WHERE c.id = %s AND m.id = %s AND m.state = 'active'
     """, (course_id, member_id)).fetchone()
     if course is None:
         return None
-    as_of = as_of or datetime.now(timezone.utc)
+    as_of = as_of or course["read_at"]
     today = as_of.astimezone(ZoneInfo(course["timezone"] or "UTC")).date()
     grades = cursor.execute("""
-        SELECT a.ticket_id, a.day, p.id, p.result->'score' AS score
+        SELECT a.ticket_id, a.day, p.id, COALESCE(review.result, p.result)->'score' AS score
         FROM assignments AS a JOIN attempts AS p ON p.assignment_id = a.id
+        LEFT JOIN appeals AS review ON review.attempt_id = p.id AND review.reviewed_at <= %s
         WHERE a.course_id = %s AND a.member_id = %s AND p.status = 'graded'
             AND p.graded_at <= %s AND a.day <= %s AND p.result IS NOT NULL
         ORDER BY a.day DESC, p.submitted_at DESC, p.id DESC
-    """, (course_id, member_id, as_of, today)).fetchall()
+    """, (as_of, course_id, member_id, as_of, today)).fetchall()
     by_ticket = defaultdict(list)
     for row in grades:
         by_ticket[row["ticket_id"]].append(row)

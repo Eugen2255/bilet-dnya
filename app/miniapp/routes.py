@@ -272,14 +272,18 @@ def dashboard(course_id: UUID, db: Database, user: Reader):
 @router.get("/attempts/{attempt_id}")
 def attempt(attempt_id: UUID, db: Database, user: Reader):
     row = db.execute("""
-        SELECT p.status, p.result, r.answer, r.points, r.state AS rubric_state
+        SELECT p.status, COALESCE(review.result, p.result) AS result, r.answer, r.points, r.state AS rubric_state
         FROM attempts AS p JOIN assignments AS a ON a.id = p.assignment_id
         JOIN memberships AS m ON m.id = a.member_id JOIN rubrics AS r ON r.id = a.rubric_id
+        LEFT JOIN appeals AS review ON review.attempt_id = p.id
         WHERE p.id = %s AND m.user_id = %s AND m.state = 'active'
     """, (attempt_id, user.user_id)).fetchone()
     if row is None:
         raise ApiError("NOT_FOUND", "Объект недоступен.", 404)
     result = row["result"] or {}
+    if row["rubric_state"] == "revoked":
+        return {"status": row["status"], "score": result.get("score"), "covered": None, "missing": None,
+                "errors": None, "feedback": "Эталон проверяет преподаватель.", "reference": None}
     points = {p["id"]: p["text"] for p in row["points"]}
     return {
         "status": row["status"], "score": result.get("score"),

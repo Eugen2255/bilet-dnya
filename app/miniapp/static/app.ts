@@ -12,7 +12,7 @@ type ImportView = { importId: string; status: string; questions: Question[]; war
 type Citation = { chunkId: string; quote: string };
 type Point = { id: string; text: string; citation: Citation | null };
 type Ticket = {
-    id: string; question: string; version: number; status: string; approvedVersion: number | null;
+    id: string; question: string; version: number; status: string; approvedVersion: number | null; reviewRequired: boolean;
     rubric: { answer: string; sourceStatus: string; points: Point[] } | null;
 };
 type ProgressTicket = { id: string; question: string; passes: number; lastScore: number | null;
@@ -348,7 +348,9 @@ function questionEditor(result: ImportView, done: () => Promise<void>): HTMLForm
 function rubricEditor(ticket: Ticket, refresh: () => Promise<void>): HTMLElement {
     const saved = ticket.rubric;
     const detail = make("details", "", make("summary", "", ticket.question));
-    const label = ticket.approvedVersion ? "Утверждена версия " + ticket.approvedVersion : "Ожидает утверждения";
+    let label = "Ожидает утверждения";
+    if (ticket.reviewRequired) label = "Эталон отозван по жалобам · утвердите новую версию";
+    else if (ticket.approvedVersion) label = "Утверждена версия " + ticket.approvedVersion;
     detail.append(make("p", "muted", label + (saved?.sourceStatus === "unsourced" ? " · есть пункты без источника" : "")));
     const answer = textarea(saved?.answer || "", 4);
     answer.maxLength = 10000;
