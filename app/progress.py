@@ -35,7 +35,7 @@ def group_stats(grades: list[dict]) -> tuple[list[dict], list[dict]]:
         for row in rows:
             keys = set(row["result"].get("missingIds", []))
             missing.update({point["text"] for point in row["points"] if point["id"] in keys})
-            errors += len(row["result"].get("errors", []))
+            errors += row["result"].get("errorCount", len(row["result"].get("errors", [])))
         topics.append({
             "question": rows[0]["question"],
             "answers": len(rows),

@@ -33,8 +33,10 @@ services:
       MODEL_FALLBACK_ID: ${MODEL_FALLBACK_ID:-}
       MODEL_FALLBACK_API_KEY: ${MODEL_FALLBACK_API_KEY:-}
       IMPORT_STORAGE: /srv/bilet/uploads
+      PRIVACY_LEDGER_PATH: /srv/bilet/privacy/deletions.sqlite3
     volumes:
       - import_uploads:/srv/bilet/uploads
+      - privacy_ledger:/srv/bilet/privacy
     stop_grace_period: 45s
     depends_on:
       db:
@@ -60,3 +62,4 @@ services:
 volumes:
   postgres_data:
   import_uploads:
+  privacy_ledger:

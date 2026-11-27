@@ -2,6 +2,8 @@ from psycopg import Connection, Cursor
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
+from app.operations import mark_delivered, record_error
+from app.privacy import lock_account
 from app.queue import Job
 from app.telegram.api import BotAPI, TelegramError
 from app.telegram.delivery import ready_delivery
@@ -12,6 +14,7 @@ from app.telegram.study import handle_study_event, show_today, study_event
 TELEGRAM_JOB_TYPES = (
     "telegram_update", "telegram_reply", "telegram_callback", "telegram_prompt",
     "deliver_morning", "deliver_daily_portion", "deliver_digest", "deliver_grade", "deliver_grade_delay",
+    "deliver_answer_ack",
 )
 MAX_TRIES = 3
 
@@ -27,6 +30,8 @@ def leased_job(cursor: Cursor, job: Job, *, lock: bool = True) -> dict | None:
 
 
 def finish_job(cursor: Cursor, job: Job, state: str, result: dict, *, clear_payload: bool = False) -> str:
+    if "error" in result:
+        record_error(cursor, job.id, "telegram", str(result["error"] or "UNAVAILABLE"))
     cursor.execute("""
         UPDATE jobs SET state = %s, lease_until = NULL, result = %s,
             payload = CASE WHEN %s THEN '{}'::jsonb ELSE payload END
@@ -36,6 +41,7 @@ def finish_job(cursor: Cursor, job: Job, state: str, result: dict, *, clear_payl
 
 
 def defer_job(cursor: Cursor, job: Job, error: TelegramError) -> str:
+    record_error(cursor, job.id, "telegram", str(error.code or "UNAVAILABLE"))
     cursor.execute("""
         UPDATE jobs SET state = 'queued', lease_until = NULL, result = NULL,
             run_at = clock_timestamp() + make_interval(secs => %s)
@@ -69,7 +75,11 @@ def handle_update_job(connection: Connection, job: Job, bot: BotAPI) -> str:
         current = leased_job(cursor, job)
         if current is None:
             return "lease_lost"
-        if update is None:
+        if actor := command or event:
+            lock_account(cursor, actor.user_id)
+        if update is None or cursor.execute("""
+            SELECT 1 FROM telegram_updates WHERE update_id = %s AND state = 'received'
+        """, (update_id,)).fetchone() is None:
             return finish_job(cursor, job, "done", {"skipped": "update_unavailable"})
         if error is not None and error.transient and current["tries"] < MAX_TRIES:
             return defer_job(cursor, job, error)
@@ -129,6 +139,8 @@ def handle_reply_job(connection: Connection, job: Job, bot: BotAPI) -> str:
         if current is None:
             return "lease_lost"
         if error is None:
+            if outbound.attempt_id is not None and outbound.receipt is not None:
+                mark_delivered(cursor, outbound.attempt_id, outbound.receipt)
             if outbound.prompt_id is not None:
                 cursor.execute("""
                     UPDATE assignments SET dm_message_id = %s WHERE id = %s AND state = 'open'

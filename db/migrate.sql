@@ -72,4 +72,13 @@ SELECT NOT EXISTS (
     INSERT INTO schema_migrations (version) VALUES ('007_reviews');
 \endif
 
+SELECT NOT EXISTS (
+    SELECT FROM schema_migrations WHERE version = '008_operations'
+) AS apply_008_operations \gset
+
+\if :apply_008_operations
+    \ir migrations/008_operations.sql
+    INSERT INTO schema_migrations (version) VALUES ('008_operations');
+\endif
+
 COMMIT;

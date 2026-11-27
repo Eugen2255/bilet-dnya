@@ -16,6 +16,8 @@ from app.telegram.study import portion_forecast, portion_markup
 class Outbound:
     payload: dict
     prompt_id: UUID | None = None
+    attempt_id: UUID | None = None
+    receipt: str | None = None
 
 
 def ready_delivery(cursor: Cursor, job: Job, username: str = "") -> Outbound | None:
@@ -27,6 +29,16 @@ def ready_delivery(cursor: Cursor, job: Job, username: str = "") -> Outbound | N
     if job.type == "telegram_callback":
         return Outbound(payload) if isinstance(payload.get("callback_query_id"), str) else None
     try:
+        if job.type == "deliver_answer_ack":
+            attempt_id = UUID(payload["attemptId"])
+            row = cursor.execute("""
+                SELECT u.dm_chat_id FROM attempts AS p JOIN assignments AS a ON a.id = p.assignment_id
+                JOIN memberships AS m ON m.id = a.member_id JOIN users AS u ON u.id = m.user_id
+                WHERE p.id = %s AND m.state = 'active' AND u.dm_chat_id IS NOT NULL
+                    AND p.body IS NOT NULL AND p.acknowledged_at IS NULL
+            """, (attempt_id,)).fetchone()
+            return Outbound({"chat_id": row["dm_chat_id"], "text": "Ответ принят, проверяем."},
+                            attempt_id=attempt_id, receipt="acknowledgement") if row else None
         if job.type == "deliver_grade":
             return grade_message(cursor, UUID(payload["attemptId"]), payload.get("expectedStatus"))
         if job.type == "deliver_grade_delay":
@@ -175,7 +187,7 @@ def grade_message(cursor: Cursor, attempt_id: UUID, expected_status: str | None)
                 payload["reply_markup"] = {"inline_keyboard": buttons}
     else:
         return None
-    return Outbound(payload)
+    return Outbound(payload, attempt_id=attempt_id, receipt="grade" if row["status"] == "graded" else None)
 
 
 def format_grade(row: dict) -> str:

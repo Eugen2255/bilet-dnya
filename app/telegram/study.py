@@ -7,6 +7,7 @@ from psycopg import Cursor
 from psycopg.types.json import Jsonb
 
 from app.practice import ensure_portion
+from app.privacy import confirm_deletion, request_deletion
 from app.queue import enqueue_delivery
 from app.reviews import report_rubric, request_appeal
 from app.telegram.onboarding import mini_app_button, reply
@@ -50,6 +51,8 @@ def study_event(update: dict) -> StudyEvent | None:
             return StudyEvent("today", user_id, chat_id, addressed_to=addressed_to)
         if name == "/app":
             return StudyEvent("app", user_id, chat_id, addressed_to=addressed_to)
+        if name == "/delete_me":
+            return StudyEvent("delete_me", user_id, chat_id, addressed_to=addressed_to)
         if name == "/rating":
             return StudyEvent("rating", user_id, chat_id, text=argument.strip().lower(), addressed_to=addressed_to)
         if command.startswith("/") and target_id is None:
@@ -178,7 +181,7 @@ def accept_answer(cursor: Cursor, update_id: int, event: StudyEvent, received_at
             ON CONFLICT (key) DO NOTHING
         """, (f"deliver_grade_delay:{attempt_id}", Jsonb({"attemptId": attempt_id}),
               received_at + timedelta(seconds=25)))
-        reply(cursor, update_id, event.chat_id, "Ответ принят, проверяем.")
+        enqueue_delivery(cursor, f"deliver_answer_ack:{attempt_id}", "deliver_answer_ack", {"attemptId": attempt_id})
 
 
 def choose_ticket(cursor: Cursor, event: StudyEvent, assignment_id: UUID) -> str:
@@ -243,6 +246,15 @@ def handle_study_event(cursor: Cursor, update_id: int, event: StudyEvent, receiv
     elif event.kind == "app":
         button = mini_app_button()
         reply(cursor, update_id, event.chat_id, "Откройте Билет дня." if button else "Mini App пока недоступна.", button)
+    elif event.kind == "delete_me":
+        token = request_deletion(cursor, event.user_id, event.chat_id)
+        if token is None:
+            reply(cursor, update_id, event.chat_id, "Ваших данных в Билете дня нет.")
+        else:
+            reply(cursor, update_id, event.chat_id,
+                  "Удалить ваши задания, ответы и историю во всех группах? Кнопка действует 10 минут. "
+                  "Уже отправленные сообщения останутся в Telegram.",
+                  {"inline_keyboard": [[{"text": "Удалить мои данные", "callback_data": f"delete:{token}"}]]})
     else:
         kind, _, raw_id = event.text.partition(":")
         try:
@@ -258,6 +270,12 @@ def handle_study_event(cursor: Cursor, update_id: int, event: StudyEvent, receiv
             message = request_appeal(cursor, target, event.user_id, event.chat_id, received_at)
         elif target is not None and kind == "report":
             message = report_rubric(cursor, target, event.user_id, event.chat_id, received_at)
+        elif target is not None and kind == "delete":
+            if confirm_deletion(cursor, target, event.user_id, event.chat_id):
+                message = "Данные удалены из Билета дня."
+                reply(cursor, update_id, event.chat_id, message, slot="deleted")
+            else:
+                message = "Подтверждение недоступно. Откройте /delete_me заново."
         enqueue_delivery(cursor, f"telegram_callback:{update_id}", "telegram_callback",
                          {"callback_query_id": event.callback_id, "text": message})
 

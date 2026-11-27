@@ -79,9 +79,9 @@ def groups_for(db: Connection, user_id: UUID) -> dict:
     for group in groups:
         courses = db.execute("""
             SELECT id, title, state FROM courses WHERE group_id = %s
-                AND (state IN ('active', 'paused') OR (%s AND state = 'draft'))
+                AND (state IN ('active', 'paused') OR (%s AND state = 'draft') OR (%s AND state = 'closed'))
             ORDER BY CASE WHEN state IN ('active', 'paused') THEN 0 ELSE 1 END, title, id
-        """, (group["id"], group["role"] in EDITOR_ROLES)).fetchall()
+        """, (group["id"], group["role"] in EDITOR_ROLES, group["role"] == "organizer")).fetchall()
         active = next((str(course["id"]) for course in courses if course["state"] in {"active", "paused"}), None)
         items.append({
             "id": str(group["id"]), "title": group["title"] or "Учебная группа",

@@ -9,6 +9,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from app.ai.client import ModelError
 from app.ai.grading import Grade, Grader, RubricPoint
+from app.operations import record_error
 from app.practice import reconsider_personal_repeat, remember_weak_attempt
 from app.queue import enqueue_delivery
 
@@ -199,6 +200,8 @@ def _finish(
 
 
 def _update_job(cursor, job_id: UUID, state: str, result: dict, delay: int = 0) -> None:
+    if "error" in result:
+        record_error(cursor, job_id, "model", result["error"])
     cursor.execute("""
         UPDATE jobs SET state = %s, result = %s, lease_until = NULL,
             run_at = CASE WHEN %s = 'queued' THEN clock_timestamp() + (%s * interval '1 second')

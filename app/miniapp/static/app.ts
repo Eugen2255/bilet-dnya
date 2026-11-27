@@ -408,8 +408,33 @@ function rubricEditor(ticket: Ticket, refresh: () => Promise<void>): HTMLElement
     return detail;
 }
 
+function removeCourseAction(course: Course): HTMLButtonElement {
+    const remove = button("Удалить курс", "text-button");
+    remove.onclick = () => {
+        const form = make("form");
+        const title = input("text");
+        title.required = true;
+        title.maxLength = 120;
+        title.oninput = () => title.setCustomValidity(title.value === course.title ? "" : "Введите точное название курса.");
+        form.append(field("Название курса", title));
+        submit(form, "Подтвердить удаление", async () => {
+            await api("/courses/" + course.id, { method: "DELETE", body: { confirmTitle: title.value } });
+            modal.close();
+            await sync();
+            notice("Курс удалён.");
+        });
+        showModal("Удалить курс «" + course.title + "»?",
+            make("p", "warning", "Будут удалены билеты, материалы, ответы и статистика курса."), form);
+    };
+    return remove;
+}
+
 async function setupView(course: Course, group: Group, version: number): Promise<HTMLElement> {
     const view = make("div", "stack");
+    if (course.status === "closed") {
+        if (group.role === "organizer") view.append(removeCourseAction(course));
+        return view;
+    }
     if (group.role === "organizer") view.append(scheduleForm(course));
     const ticketBody = make("div", "stack");
     const reload = async () => {
@@ -468,6 +493,7 @@ async function setupView(course: Course, group: Group, version: number): Promise
         view.append(panel("Преподаватель", result.items.length ?
             make("div", "stack", field("Участник группы", people), chosen, invitation) :
             make("p", "muted", "Пригласить можно после подключения студента к группе.")));
+        view.append(removeCourseAction(course));
     }
     await reload();
     return view;
