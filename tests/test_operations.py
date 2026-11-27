@@ -7,7 +7,7 @@ from itertools import count
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Barrier, Event, Thread
-from time import monotonic, sleep
+from time import monotonic, perf_counter, sleep
 from unittest.mock import patch
 
 import psycopg
@@ -199,8 +199,25 @@ class OperationsTests(unittest.TestCase):
                     break
                 sleep(0.1)
             self.assertEqual((sample["submitted"], sample["acknowledged"], sample["delivered"]), (10, 10, 10), sample)
+            with TestClient(app, base_url=ORIGIN) as client, ThreadPoolExecutor(max_workers=10) as pool:
+                login = client.post("/v1/auth/telegram", headers={"Origin": ORIGIN},
+                                    json={"initData": signed_data(STUDENTS[0], datetime.now(timezone.utc))})
+                self.assertEqual(login.status_code, 200, login.text)
+                gate = Barrier(10)
+
+                def read_map(_):
+                    gate.wait(timeout=5)
+                    started = perf_counter()
+                    response = client.get(f"/v1/courses/{course}/dashboard")
+                    elapsed_ms = round((perf_counter() - started) * 1000)
+                    self.assertEqual(response.status_code, 200, response.text)
+                    self.assertEqual(response.json()["tickets"][0]["lastScore"], 5)
+                    return elapsed_ms
+
+                # For 10 observations, the nearest-rank 95th percentile is the maximum.
+                map_p95 = max(pool.map(read_map, range(10)))
             print(f"Synthetic 10-answer P95: acknowledgement {sample['acknowledgement_p95_ms']} ms, "
-                  f"grade delivery {sample['grade_delivery_p95_ms']} ms")
+                  f"grade delivery {sample['grade_delivery_p95_ms']} ms, dashboard {map_p95} ms")
         finally:
             stop.set()
             worker.join(timeout=6)
