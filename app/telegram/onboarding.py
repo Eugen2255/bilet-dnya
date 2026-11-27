@@ -1,8 +1,10 @@
+import os
 import re
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from psycopg import Connection, Cursor
@@ -25,6 +27,7 @@ class Command:
     chat_id: int
     chat_type: str
     user_id: int
+    chat_title: str | None = None
 
 
 @dataclass(frozen=True)
@@ -53,7 +56,9 @@ def parse_command(update: object) -> Command | None:
     chat_type = chat.get("type")
     if chat_type not in ("group", "supergroup", "private"):
         return None
-    return Command(name, addressed_to, parts[1] if len(parts) == 2 else "", chat["id"], chat_type, user["id"])
+    title = chat.get("title")
+    return Command(name, addressed_to, parts[1] if len(parts) == 2 else "", chat["id"], chat_type, user["id"],
+                   title.replace("\x00", "")[:200] if isinstance(title, str) else None)
 
 
 def prepare_action(connection: Connection, bot: BotAPI, command: Command) -> Action:
@@ -85,7 +90,7 @@ def prepare_action(connection: Connection, bot: BotAPI, command: Command) -> Act
             return Action("reply", "Подтвердить привязку может администратор группы.")
         return Action("bind", username=bot.username, token_hash=digest)
     if status in ADMINS or status == "member" or (status == "restricted" and member.get("is_member") is True):
-        return Action("join", token_hash=digest)
+        return Action(link["kind"], token_hash=digest)
     return Action("reply", NOT_MEMBER)
 
 
@@ -98,7 +103,8 @@ def find_link(cursor: Cursor, digest: str, user_id: int, *, lock: bool = False) 
         LEFT JOIN users ON users.id = member.user_id
         WHERE token.token_hash = %s AND token.consumed_at IS NULL AND token.expires_at > clock_timestamp()
             AND (
-                (token.kind = 'bind' AND users.telegram_user_id = %s)
+                (token.kind IN ('bind','teacher') AND users.telegram_user_id = %s
+                    AND (token.kind = 'bind' OR (member.state = 'active' AND member.role = 'student')))
                 OR (token.kind = 'join' AND EXISTS (
                     SELECT 1 FROM memberships AS organizer
                     WHERE organizer.group_id = token.group_id AND organizer.role = 'organizer'
@@ -115,16 +121,32 @@ def token_hash(token: str) -> str:
     return sha256(token.encode()).hexdigest()
 
 
-def issue_button(
-    cursor: Cursor, group_id: UUID, username: str, title: str, expires_at: datetime,
+def issue_start_url(
+    cursor: Cursor, group_id: UUID, username: str, expires_at: datetime,
     kind: str, member_id: UUID | None = None,
-) -> dict:
+) -> str:
     token = secrets.token_urlsafe(24)
     cursor.execute("""
         INSERT INTO action_tokens (token_hash, kind, group_id, member_id, expires_at)
         VALUES (%s, %s, %s, %s, %s)
     """, (token_hash(token), kind, group_id, member_id, expires_at))
-    return {"inline_keyboard": [[{"text": title, "url": f"https://t.me/{username}?start={token}"}]]}
+    return f"https://t.me/{username}?start={token}"
+
+
+def issue_button(
+    cursor: Cursor, group_id: UUID, username: str, title: str, expires_at: datetime,
+    kind: str, member_id: UUID | None = None,
+) -> dict:
+    url = issue_start_url(cursor, group_id, username, expires_at, kind, member_id)
+    return {"inline_keyboard": [[{"text": title, "url": url}]]}
+
+
+def mini_app_button() -> dict | None:
+    value = os.getenv("MINI_APP_URL", "").strip()
+    url = urlsplit(value)
+    if url.scheme != "https" or not url.hostname:
+        return None
+    return {"inline_keyboard": [[{"text": "Открыть Билет дня", "web_app": {"url": value}}]]}
 
 
 def issue_join_button(cursor: Cursor, group_id: UUID, username: str, expires_at: datetime) -> dict:
@@ -156,10 +178,10 @@ def apply_action(cursor: Cursor, update_id: int, command: Command, action: Actio
 
     if action.kind == "issue_bind":
         group = cursor.execute("""
-            INSERT INTO study_groups (telegram_chat_id) VALUES (%s)
-            ON CONFLICT (telegram_chat_id) DO UPDATE SET telegram_chat_id = EXCLUDED.telegram_chat_id
+            INSERT INTO study_groups (telegram_chat_id, title) VALUES (%s, %s)
+            ON CONFLICT (telegram_chat_id) DO UPDATE SET title = COALESCE(EXCLUDED.title, study_groups.title)
             RETURNING id
-        """, (command.chat_id,)).fetchone()["id"]
+        """, (command.chat_id, command.chat_title)).fetchone()["id"]
         user = store_user(cursor, command.user_id, None)
         member = cursor.execute("""
             INSERT INTO memberships (group_id, user_id, role, state, alias)
@@ -178,10 +200,19 @@ def apply_action(cursor: Cursor, update_id: int, command: Command, action: Actio
         return
 
     user = store_user(cursor, command.user_id, command.chat_id)
-    if action.kind == "bind":
+    if action.kind in {"bind", "teacher"}:
         cursor.execute("""
             UPDATE action_tokens SET consumed_at = clock_timestamp() WHERE token_hash = %s
         """, (action.token_hash,))
+    if action.kind == "teacher":
+        updated = cursor.execute("""
+            UPDATE memberships SET role = 'teacher' WHERE id = %s AND state = 'active' AND role = 'student'
+            RETURNING id
+        """, (link["member_id"],)).fetchone()
+        text = "Приглашение принято. Вы преподаватель группы." if updated else INVALID_LINK
+        reply(cursor, update_id, command.chat_id, text, mini_app_button() if updated else None)
+        return None
+    if action.kind == "bind":
         cursor.execute("""
             UPDATE memberships SET role = 'organizer', state = 'active' WHERE id = %s
         """, (link["member_id"],))
@@ -189,13 +220,13 @@ def apply_action(cursor: Cursor, update_id: int, command: Command, action: Actio
                                    datetime.now(timezone.utc) + timedelta(days=1))
         reply(cursor, update_id, link["telegram_chat_id"], "Группа подключена. Откройте бота, чтобы участвовать.",
               button, slot="group")
-        reply(cursor, update_id, command.chat_id, "Привязка завершена. Вы организатор группы.")
+        reply(cursor, update_id, command.chat_id, "Привязка завершена. Вы организатор группы.", mini_app_button())
     else:
         cursor.execute("""
             INSERT INTO memberships (group_id, user_id, role, state, alias)
             VALUES (%s, %s, 'student', 'active', %s)
             ON CONFLICT (group_id, user_id) DO UPDATE SET state = 'active'
         """, (link["group_id"], user, f"Участник-{secrets.token_hex(3)}"))
-        reply(cursor, update_id, command.chat_id, "Вы подключились к группе.")
+        reply(cursor, update_id, command.chat_id, "Вы подключились к группе.", mini_app_button())
         return link["group_id"]
     return None

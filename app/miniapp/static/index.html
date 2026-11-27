@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light">
+  <title>Билет дня</title>
+  <link rel="stylesheet" href="./styles.css">
+  <script src="https://telegram.org/js/telegram-web-app.js?65" defer></script>
+  <script type="module" src="./app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="layout header-content">
+      <div class="brand"><span class="brand-mark" aria-hidden="true">Б</span><span>Билет дня</span></div>
+      <span id="role" class="role" hidden></span>
+    </div>
+  </header>
+  <main id="main" class="layout main">
+    <p id="notice" class="notice" role="status" aria-live="polite" hidden></p>
+    <div id="content" aria-busy="true"><section class="panel empty"><h1>Билет дня</h1><p>Открываем приложение…</p></section></div>
+  </main>
+  <dialog id="detail" aria-labelledby="detail-title">
+    <div class="dialog-head"><h2 id="detail-title"></h2><form method="dialog"><button class="text-button">Закрыть</button></form></div>
+    <div id="detail-content"></div>
+  </dialog>
+</body>
+</html>

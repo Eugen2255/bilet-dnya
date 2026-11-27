@@ -8,7 +8,7 @@ from psycopg.types.json import Jsonb
 
 from app.practice import ensure_portion
 from app.queue import enqueue_delivery
-from app.telegram.onboarding import reply
+from app.telegram.onboarding import mini_app_button, reply
 
 
 @dataclass(frozen=True)
@@ -47,6 +47,8 @@ def study_event(update: dict) -> StudyEvent | None:
         name, _, addressed_to = first.partition("@")
         if name == "/today":
             return StudyEvent("today", user_id, chat_id, addressed_to=addressed_to)
+        if name == "/app":
+            return StudyEvent("app", user_id, chat_id, addressed_to=addressed_to)
         if name == "/rating":
             return StudyEvent("rating", user_id, chat_id, text=argument.strip().lower(), addressed_to=addressed_to)
         if command.startswith("/") and target_id is None:
@@ -228,6 +230,9 @@ def handle_study_event(cursor: Cursor, update_id: int, event: StudyEvent, receiv
         accept_answer(cursor, update_id, event, received_at)
     elif event.kind == "rating":
         set_rating(cursor, update_id, event)
+    elif event.kind == "app":
+        button = mini_app_button()
+        reply(cursor, update_id, event.chat_id, "Откройте Билет дня." if button else "Mini App пока недоступна.", button)
     else:
         kind, _, raw_id = event.text.partition(":")
         try:
