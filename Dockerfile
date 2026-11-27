@@ -11,6 +11,9 @@ RUN apt-get update \
     && useradd --system --no-create-home bilet \
     && install -d -m 0700 -o bilet -g bilet /srv/bilet/uploads
 
+COPY requirements-web.txt ./
+RUN pip install --no-cache-dir -r requirements-web.txt
+
 COPY app ./app
 USER bilet
 
