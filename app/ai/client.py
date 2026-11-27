@@ -43,6 +43,7 @@ class ChatClient:
     model: str
     api_key: str = field(default="", repr=False)
     timeout: float = 12.0
+    thinking: bool | None = None
 
     def __post_init__(self) -> None:
         url = urlsplit(self.url)
@@ -58,20 +59,28 @@ class ChatClient:
             raise ValueError("Set MODEL_PRIMARY_URL to the full chat completions endpoint")
 
     @classmethod
-    def from_env(cls, prefix: str = "MODEL_PRIMARY") -> "ChatClient":
-        url, model = os.getenv(f"{prefix}_URL", "").strip(), os.getenv(f"{prefix}_ID", "").strip()
+    def from_env(cls, prefix: str = "MODEL_PRIMARY", *, model_id: str | None = None) -> "ChatClient":
+        url = os.getenv(f"{prefix}_URL", "").strip()
+        model = model_id or os.getenv(f"{prefix}_ID", "").strip()
         if not url or not model:
             raise ValueError(f"Set {prefix}_URL and {prefix}_ID")
-        return cls(url, model, os.getenv(f"{prefix}_API_KEY", "").strip())
+        setting = os.getenv(f"{prefix}_THINKING", "").strip().lower()
+        if setting not in {"", "true", "false"}:
+            raise ValueError(f"Set {prefix}_THINKING to true, false, or leave it empty")
+        return cls(url, model, os.getenv(f"{prefix}_API_KEY", "").strip(),
+                   thinking=(setting == "true") if setting else None)
 
     def complete(self, messages: list[dict[str, str]], *, temperature: float = 0, max_tokens: int = 500) -> str:
-        payload = self._request_json(self.url, {
+        body = {
             "model": self.model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
             "stream": False,
-        })
+        }
+        if self.thinking is not None:
+            body["chat_template_kwargs"] = {"enable_thinking": self.thinking}
+        payload = self._request_json(self.url, body)
         try:
             choice = payload["choices"][0]
             content = choice["message"]["content"]

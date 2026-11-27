@@ -6,3 +6,4 @@
 Dockerfile text eol=lf
 *.docx binary
 deploy/*.sh text eol=lf
+evals/**/*.json text eol=lf

@@ -1,0 +1,343 @@
+{
+  "measuredAt": "2026-11-27T09:51:29.567845+00:00",
+  "datasetSha256": "2b689e0474aedbf1d00218e653724d1226dd6bf337a62fa12d608f65f939da17",
+  "profile": "primary",
+  "thinking": false,
+  "promptVersion": "grade-v1",
+  "model": "qwen3.8-flash-next",
+  "annotationSource": "codex_rubric_annotation_on_synthetic_answers",
+  "targetWithinOneRate": 0.85,
+  "targetMet": true,
+  "overall": {
+    "total": 36,
+    "rated": 33,
+    "failed": 3,
+    "exact": 33,
+    "withinOne": 33,
+    "withinOneRate": 0.9167,
+    "meanAbsoluteError": 0.0,
+    "latencyP95Ms": 11825
+  },
+  "byCategory": {
+    "factual_error": {
+      "total": 12,
+      "rated": 10,
+      "failed": 2,
+      "exact": 10,
+      "withinOne": 10,
+      "withinOneRate": 0.8333,
+      "meanAbsoluteError": 0.0,
+      "latencyP95Ms": 13194
+    },
+    "paraphrase": {
+      "total": 12,
+      "rated": 12,
+      "failed": 0,
+      "exact": 12,
+      "withinOne": 12,
+      "withinOneRate": 1.0,
+      "meanAbsoluteError": 0.0,
+      "latencyP95Ms": 11024
+    },
+    "partial": {
+      "total": 12,
+      "rated": 11,
+      "failed": 1,
+      "exact": 11,
+      "withinOne": 11,
+      "withinOneRate": 0.9167,
+      "meanAbsoluteError": 0.0,
+      "latencyP95Ms": 11825
+    }
+  },
+  "cases": [
+    {
+      "id": "pk-01",
+      "category": "paraphrase",
+      "expected": 5,
+      "actual": 5,
+      "latencyMs": 3392,
+      "error": null
+    },
+    {
+      "id": "pk-02",
+      "category": "paraphrase",
+      "expected": 5,
+      "actual": 5,
+      "latencyMs": 1863,
+      "error": null
+    },
+    {
+      "id": "pk-03",
+      "category": "partial",
+      "expected": 3,
+      "actual": 3,
+      "latencyMs": 11825,
+      "error": null
+    },
+    {
+      "id": "pk-04",
+      "category": "partial",
+      "expected": 2,
+      "actual": 2,
+      "latencyMs": 4719,
+      "error": null
+    },
+    {
+      "id": "pk-05",
+      "category": "factual_error",
+      "expected": 2,
+      "actual": 2,
+      "latencyMs": 1884,
+      "error": null
+    },
+    {
+      "id": "pk-06",
+      "category": "factual_error",
+      "expected": 0,
+      "actual": 0,
+      "latencyMs": 3911,
+      "error": null
+    },
+    {
+      "id": "left-join-01",
+      "category": "paraphrase",
+      "expected": 5,
+      "actual": 5,
+      "latencyMs": 2415,
+      "error": null
+    },
+    {
+      "id": "left-join-02",
+      "category": "paraphrase",
+      "expected": 5,
+      "actual": 5,
+      "latencyMs": 3852,
+      "error": null
+    },
+    {
+      "id": "left-join-03",
+      "category": "partial",
+      "expected": 3,
+      "actual": 3,
+      "latencyMs": 6328,
+      "error": null
+    },
+    {
+      "id": "left-join-04",
+      "category": "partial",
+      "expected": 4,
+      "actual": 4,
+      "latencyMs": 3494,
+      "error": null
+    },
+    {
+      "id": "left-join-05",
+      "category": "factual_error",
+      "expected": 3,
+      "actual": 3,
+      "latencyMs": 3435,
+      "error": null
+    },
+    {
+      "id": "left-join-06",
+      "category": "factual_error",
+      "expected": 0,
+      "actual": 0,
+      "latencyMs": 4358,
+      "error": null
+    },
+    {
+      "id": "index-01",
+      "category": "paraphrase",
+      "expected": 5,
+      "actual": 5,
+      "latencyMs": 3634,
+      "error": null
+    },
+    {
+      "id": "index-02",
+      "category": "paraphrase",
+      "expected": 5,
+      "actual": 5,
+      "latencyMs": 2051,
+      "error": null
+    },
+    {
+      "id": "index-03",
+      "category": "partial",
+      "expected": 3,
+      "actual": 3,
+      "latencyMs": 3686,
+      "error": null
+    },
+    {
+      "id": "index-04",
+      "category": "partial",
+      "expected": 1,
+      "actual": 1,
+      "latencyMs": 5276,
+      "error": null
+    },
+    {
+      "id": "index-05",
+      "category": "factual_error",
+      "expected": 3,
+      "actual": 3,
+      "latencyMs": 2818,
+      "error": null
+    },
+    {
+      "id": "index-06",
+      "category": "factual_error",
+      "expected": 0,
+      "actual": 0,
+      "latencyMs": 2008,
+      "error": null
+    },
+    {
+      "id": "atomicity-01",
+      "category": "paraphrase",
+      "expected": 5,
+      "actual": 5,
+      "latencyMs": 5988,
+      "error": null
+    },
+    {
+      "id": "atomicity-02",
+      "category": "paraphrase",
+      "expected": 5,
+      "actual": 5,
+      "latencyMs": 3032,
+      "error": null
+    },
+    {
+      "id": "atomicity-03",
+      "category": "partial",
+      "expected": 3,
+      "actual": 3,
+      "latencyMs": 3938,
+      "error": null
+    },
+    {
+      "id": "atomicity-04",
+      "category": "partial",
+      "expected": 2,
+      "actual": 2,
+      "latencyMs": 5435,
+      "error": null
+    },
+    {
+      "id": "atomicity-05",
+      "category": "factual_error",
+      "expected": 1,
+      "actual": 1,
+      "latencyMs": 4297,
+      "error": null
+    },
+    {
+      "id": "atomicity-06",
+      "category": "factual_error",
+      "expected": 0,
+      "actual": 0,
+      "latencyMs": 6308,
+      "error": null
+    },
+    {
+      "id": "bfs-01",
+      "category": "paraphrase",
+      "expected": 5,
+      "actual": 5,
+      "latencyMs": 2563,
+      "error": null
+    },
+    {
+      "id": "bfs-02",
+      "category": "paraphrase",
+      "expected": 5,
+      "actual": 5,
+      "latencyMs": 2458,
+      "error": null
+    },
+    {
+      "id": "bfs-03",
+      "category": "partial",
+      "expected": 3,
+      "actual": null,
+      "latencyMs": 12103,
+      "error": "MODEL_UNAVAILABLE"
+    },
+    {
+      "id": "bfs-04",
+      "category": "partial",
+      "expected": 1,
+      "actual": 1,
+      "latencyMs": 2852,
+      "error": null
+    },
+    {
+      "id": "bfs-05",
+      "category": "factual_error",
+      "expected": 2,
+      "actual": null,
+      "latencyMs": 12058,
+      "error": "MODEL_UNAVAILABLE"
+    },
+    {
+      "id": "bfs-06",
+      "category": "factual_error",
+      "expected": 0,
+      "actual": 0,
+      "latencyMs": 2387,
+      "error": null
+    },
+    {
+      "id": "stable-sort-01",
+      "category": "paraphrase",
+      "expected": 5,
+      "actual": 5,
+      "latencyMs": 11024,
+      "error": null
+    },
+    {
+      "id": "stable-sort-02",
+      "category": "paraphrase",
+      "expected": 5,
+      "actual": 5,
+      "latencyMs": 3089,
+      "error": null
+    },
+    {
+      "id": "stable-sort-03",
+      "category": "partial",
+      "expected": 2,
+      "actual": 2,
+      "latencyMs": 4072,
+      "error": null
+    },
+    {
+      "id": "stable-sort-04",
+      "category": "partial",
+      "expected": 3,
+      "actual": 3,
+      "latencyMs": 1799,
+      "error": null
+    },
+    {
+      "id": "stable-sort-05",
+      "category": "factual_error",
+      "expected": 2,
+      "actual": null,
+      "latencyMs": 2618,
+      "error": "INVALID_GRADE_POINT_IDS"
+    },
+    {
+      "id": "stable-sort-06",
+      "category": "factual_error",
+      "expected": 0,
+      "actual": 0,
+      "latencyMs": 13194,
+      "error": null
+    }
+  ]
+}

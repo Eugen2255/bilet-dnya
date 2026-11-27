@@ -1,4 +1,5 @@
 import json
+import os
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -63,3 +64,15 @@ class GradingTests(unittest.TestCase):
             "model": "model-id", "messages": [{"role": "user", "content": "Ответ"}],
             "temperature": 0, "max_tokens": 500, "stream": False,
         })
+
+    def test_qwen_thinking_option_is_sent_only_when_configured(self):
+        env = {"MODEL_PRIMARY_URL": "https://test.invalid/api/chat/completions", "MODEL_PRIMARY_ID": "old-model",
+               "MODEL_PRIMARY_THINKING": "false"}
+        with patch.dict(os.environ, env):
+            client = ChatClient.from_env(model_id="calibrated-model")
+        response = {"choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}]}
+        with patch.object(ChatClient, "_request_json", return_value=response) as request:
+            client.complete([{"role": "user", "content": "Тест"}])
+        body = request.call_args.args[1]
+        self.assertEqual(body["model"], "calibrated-model")
+        self.assertEqual(body["chat_template_kwargs"], {"enable_thinking": False})
