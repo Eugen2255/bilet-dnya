@@ -1,6 +1,7 @@
 import logging
 import os
 import signal
+import sqlite3
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -17,6 +18,8 @@ from app.ai.jobs import handle_appeal_job, handle_grade_job
 from app.imports.service import (
     IMPORT_JOB_TYPE, IMPORT_LEASE_SECONDS, discard_old_upload_directories, expire_uploads, handle_import_job, storage_path,
 )
+from app.operations import purge_expired
+from app.privacy import ledger_path, reapply_deletions, trim_ledger
 from app.queue import Job, claim_job
 from app.rubrics.generation import handle_index_job, handle_rubric_job
 from app.rubrics.service import INDEX_JOB_TYPE, RUBRIC_JOB_TYPE
@@ -40,12 +43,18 @@ def process_grade(database_url: str, job: Job, grader: Grader, slots: BoundedSem
         handler(connection, job.id, job.lease_until, grader)
 
 
-def process_telegram(database_url: str, job: Job, bot: BotAPI) -> None:
+def process_telegram(database_url: str, job: Job, bot: BotAPI, stop: Event) -> None:
     with open_connection(database_url) as connection:
-        if job.type == "telegram_update":
-            handle_update_job(connection, job, bot)
-        else:
-            handle_reply_job(connection, job, bot)
+        while True:
+            if job.type == "telegram_update":
+                handle_update_job(connection, job, bot)
+            else:
+                handle_reply_job(connection, job, bot)
+            if stop.is_set():
+                return
+            job = claim_job(connection, TELEGRAM_JOB_TYPES, 90)
+            if job is None:
+                return
 
 
 def process_preparation(database_url: str, job: Job, storage: Path, grader: Grader | None, slots: BoundedSemaphore) -> None:
@@ -86,6 +95,8 @@ def run(
     import_pending = None
     uploads = storage_path()
     cleanup_at = 0.0
+    maintenance_at = 0.0
+    schedule_at = 0.0
     slots = BoundedSemaphore(MODEL_CONCURRENCY)
     with (ThreadPoolExecutor(max_workers=MODEL_CONCURRENCY) as pool,
           ThreadPoolExecutor(max_workers=1) as import_pool,
@@ -105,7 +116,21 @@ def run(
                             check_task(import_pending, "Preparation")
                             import_pending = None
 
-                        schedule_courses(connection, datetime.now(timezone.utc))
+                        now = monotonic()
+                        if now >= schedule_at:
+                            schedule_courses(connection, datetime.now(timezone.utc))
+                            schedule_at = now + 1
+                        if now >= maintenance_at:
+                            try:
+                                erased = reapply_deletions(connection, ledger_path())
+                                summary = purge_expired(connection, uploads)
+                                trim_ledger(ledger_path())
+                                logger.info("Maintenance erased=%d scrubbed_answers=%d removed_courses=%d", erased,
+                                            summary["scrubbed_answers"], summary["removed_courses"])
+                                maintenance_at = now + 3600
+                            except (sqlite3.Error, OSError) as exc:
+                                logger.warning("Maintenance failed (%s)", type(exc).__name__)
+                                maintenance_at = now + 60
                         if monotonic() >= cleanup_at:
                             expire_uploads(connection, uploads)
                             cleanup_at = monotonic() + 60
@@ -131,8 +156,8 @@ def run(
                         if bot is not None and telegram_pending is None:
                             job = claim_job(connection, TELEGRAM_JOB_TYPES, 90)
                             if job is not None:
-                                telegram_pending = telegram_pool.submit(process_telegram, database_url, job, bot)
-                        stop.wait(1)
+                                telegram_pending = telegram_pool.submit(process_telegram, database_url, job, bot, stop)
+                        stop.wait(0.05 if telegram_pending or pending else 0.25)
             except (psycopg.OperationalError, psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn) as exc:
                 logger.warning("Database or worker migration unavailable (%s)", type(exc).__name__)
                 if monotonic() >= cleanup_at:

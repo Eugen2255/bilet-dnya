@@ -12,10 +12,11 @@ RUN apt-get update \
     && install -d -m 0700 -o bilet -g bilet /srv/bilet/uploads
 
 COPY requirements-web.txt ./
-RUN pip install --no-cache-dir -r requirements-web.txt
+RUN pip install --no-cache-dir -r requirements-web.txt \
+    && install -d -m 0700 -o bilet -g bilet /srv/bilet/privacy
 
 COPY app ./app
 USER bilet
 
 EXPOSE 8000
-CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]

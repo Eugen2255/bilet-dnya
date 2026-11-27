@@ -1,8 +1,11 @@
+import logging
 from pathlib import Path
+from uuid import uuid4
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.imports.errors import ImportProblem
@@ -11,6 +14,7 @@ from app.miniapp.routes import router as miniapp_router
 from app.telegram.webhook import router as telegram_router
 
 load_dotenv()
+logger = logging.getLogger(__name__)
 app = FastAPI(title="Билет дня", version="0.1.0")
 app.include_router(telegram_router)
 app.include_router(miniapp_router)
@@ -22,7 +26,15 @@ app.mount("/app", StaticFiles(directory=Path(__file__).parent / "miniapp" / "sta
 
 @app.middleware("http")
 async def prevent_miniapp_api_caching(request: Request, call_next):
-    response = await call_next(request)
+    try:
+        response = await call_next(request)
+    except Exception as error:
+        request_id = str(uuid4())
+        logger.error("HTTP failure request_id=%s code=%s", request_id, type(error).__name__)
+        response = JSONResponse(status_code=500, content={"error": {
+            "code": "INTERNAL_ERROR", "message": "Не удалось выполнить запрос.",
+            "requestId": request_id, "retryable": True,
+        }})
     if request.url.path.startswith("/v1/"):
         response.headers["Cache-Control"] = "no-store"
     return response

@@ -12,15 +12,16 @@ from starlette.datastructures import UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
 
 from app.imports.documents import MAX_FILE_BYTES
-from app.imports.service import Upload, create_import, read_import, storage_path
+from app.imports.service import Upload, create_import, discard_uploads, read_import, storage_path
 from app.miniapp.courses import (
-    EDITOR_ROLES, ORGANIZER, activate, as_course, groups_for, idempotency_key, related_member,
+    EDITOR_ROLES, ORGANIZER, activate, as_course, groups_for, idempotency_key, organizer_course, related_member,
     require_member, save_schedule, set_paused,
 )
 from app.miniapp.errors import ApiError
 from app.miniapp.security import (
     SESSION_AGE, SESSION_COOKIE, Database, Reader, Writer, check_origin, create_session, verify_init_data,
 )
+from app.operations import delete_courses
 from app.progress import read_dashboard
 from app.rubrics.service import confirm_import, list_tickets, read_source_chunk, update_rubric
 from app.telegram.api import BotAPI, TelegramError
@@ -43,6 +44,10 @@ class Login(Payload):
 
 class CourseTitle(Payload):
     title: str = Field(min_length=1, max_length=120)
+
+
+class DeleteCourse(Payload):
+    confirmTitle: str = Field(min_length=1, max_length=120)
 
 
 class Schedule(Payload):
@@ -123,6 +128,18 @@ def read_course(course_id: UUID, db: Database, user: Reader):
 @router.patch("/courses/{course_id}")
 def patch_course(course_id: UUID, payload: Schedule, db: Database, user: Writer):
     return save_schedule(db, user.user_id, course_id, payload.model_dump(exclude_unset=True))
+
+
+@router.delete("/courses/{course_id}")
+def remove_course(course_id: UUID, payload: DeleteCourse, db: Database, user: Writer):
+    with db.transaction(), db.cursor() as cursor:
+        course = organizer_course(db, user.user_id, course_id)
+        if payload.confirmTitle != course["title"]:
+            raise ApiError("INVALID_INPUT", "Введите точное название курса.")
+        imports = delete_courses(cursor, [course_id])
+    for import_id in imports:
+        discard_uploads(storage_path(), import_id)
+    return {"status": "deleted"}
 
 
 @router.post("/courses/{course_id}/activate")

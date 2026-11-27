@@ -5,3 +5,4 @@
 *.example text eol=lf
 Dockerfile text eol=lf
 *.docx binary
+deploy/*.sh text eol=lf

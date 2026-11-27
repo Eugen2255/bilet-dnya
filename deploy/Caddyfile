@@ -1,0 +1,13 @@
+{
+    admin off
+}
+
+{$BILET_DOMAIN} {
+    @application path /health /app /app/* /v1/* /telegram/webhook
+    handle @application {
+        reverse_proxy api:8000
+    }
+    handle {
+        respond 404
+    }
+}
