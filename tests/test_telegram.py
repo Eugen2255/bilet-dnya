@@ -1,5 +1,6 @@
 import os
 import unittest
+from datetime import timedelta
 from itertools import count
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
@@ -69,10 +70,12 @@ class OnboardingTests(unittest.TestCase):
 
     def clean_fixture(self):
         keys = [key for uid in self.update_ids for key in (f"telegram_update:{uid}", f"telegram_reply:{uid}:%")]
-        self.db.execute("DELETE FROM jobs WHERE key LIKE ANY (%s) OR key = 'tg-test-reply'", (keys,))
+        self.db.execute("DELETE FROM jobs WHERE key LIKE ANY (%s) OR key LIKE 'tg-test-reply%%'", (keys,))
         self.db.execute("DELETE FROM telegram_updates WHERE update_id = ANY (%s)", (self.update_ids,))
         self.db.execute("DELETE FROM study_groups WHERE telegram_chat_id = %s", (GROUP_CHAT,))
         self.db.execute("DELETE FROM users WHERE telegram_user_id = ANY (%s)", ([ADMIN, STUDENT, OUTSIDER],))
+        self.db.execute("DELETE FROM telegram_send_limits WHERE chat_id = ANY (%s)", ([GROUP_CHAT, ADMIN, STUDENT, OUTSIDER],))
+        self.db.execute("UPDATE telegram_send_limits SET next_send_at = clock_timestamp() WHERE chat_id = 0")
 
     def command(self, user, text, *, chat="private"):
         update_id = next(self.next_id)
@@ -137,10 +140,13 @@ class OnboardingTests(unittest.TestCase):
         """, (token_hash(join),))
         self.assertEqual(self.command(STUDENT, f"/start {join}")[0]["text"], INVALID_LINK)
 
-    def test_rate_limit_and_ambiguous_delivery(self):
+    def queue_reply(self, label, chat_id):
         with self.db.cursor() as cursor:
-            enqueue_delivery(cursor, "tg-test-reply", "telegram_reply", {"chat_id": ADMIN, "text": "Тест"})
-        first = claim_job(self.db, ("telegram_reply",), 60)
+            enqueue_delivery(cursor, f"tg-test-reply-{label}", "telegram_reply", {"chat_id": chat_id, "text": "Тест"})
+        return claim_job(self.db, ("telegram_reply",), 60)
+
+    def test_rate_limit_and_ambiguous_delivery(self):
+        first = self.queue_reply("rate", ADMIN)
         self.bot.send_error = TelegramError(429, 30)
         self.assertEqual(handle_reply_job(self.db, first, self.bot), "queued")
         row = self.db.execute("""
@@ -148,8 +154,58 @@ class OnboardingTests(unittest.TestCase):
         """, (first.id,)).fetchone()
         self.assertAlmostEqual(float(row["delay"]), 30, delta=2)
         self.assertIsNone(row["result"])
+        another = self.queue_reply("other-chat", STUDENT)
+        self.bot.send_error = None
+        self.assertEqual(handle_reply_job(self.db, another, self.bot), "queued")
+        self.assertEqual(self.bot.messages, [])
+        self.assertEqual(self.db.execute("SELECT tries FROM jobs WHERE id = %s", (another.id,)).fetchone()["tries"], 0)
+        self.db.execute("UPDATE telegram_send_limits SET next_send_at = clock_timestamp() WHERE chat_id = 0")
         self.db.execute("UPDATE jobs SET run_at = clock_timestamp() WHERE id = %s", (first.id,))
         second = claim_job(self.db, ("telegram_reply",), 60)
         self.bot.send_error = TelegramError()
         self.assertEqual(handle_reply_job(self.db, second, self.bot), "delivery_unknown")
         self.assertIsNone(claim_job(self.db, ("telegram_reply",), 60))
+
+    def test_send_reservations_limit_bot_and_chat_independently(self):
+        with patch("app.telegram.rate_limit.GLOBAL_INTERVAL", timedelta(seconds=10)):
+            first = self.queue_reply("first", ADMIN)
+            self.assertEqual(handle_reply_job(self.db, first, self.bot, pace=True), "done")
+            another = self.queue_reply("global", STUDENT)
+            self.assertEqual(handle_reply_job(self.db, another, self.bot, pace=True), "queued")
+
+        self.db.execute("UPDATE telegram_send_limits SET next_send_at = clock_timestamp() WHERE chat_id = 0")
+        self.db.execute("""
+            UPDATE telegram_send_limits SET next_send_at = clock_timestamp() + interval '10 seconds'
+            WHERE chat_id = %s
+        """, (ADMIN,))
+        same = self.queue_reply("same-chat", ADMIN)
+        self.assertEqual(handle_reply_job(self.db, same, self.bot, pace=True), "queued")
+        free = self.queue_reply("free-chat", OUTSIDER)
+        self.assertEqual(handle_reply_job(self.db, free, self.bot, pace=True), "done")
+        self.assertEqual([message["chat_id"] for message in self.bot.messages], [ADMIN, OUTSIDER])
+
+    def test_forbidden_chat_is_skipped_until_telegram_restores_access(self):
+        update_id = next(self.next_id)
+        self.update_ids.append(update_id)
+        restored_access = Update(update_id=update_id, my_chat_member={
+            "chat": {"id": GROUP_CHAT, "type": "supergroup"},
+            "new_chat_member": {"status": "administrator"},
+        })
+
+        def reject_while_readded(_payload):
+            telegram_webhook(restored_access, "test-secret")
+            raise TelegramError(403)
+
+        first = self.queue_reply("forbidden", GROUP_CHAT)
+        with patch.object(self.bot, "send", side_effect=reject_while_readded):
+            self.assertEqual(handle_reply_job(self.db, first, self.bot), "failed")
+        skipped = self.queue_reply("blocked", GROUP_CHAT)
+        self.assertEqual(handle_reply_job(self.db, skipped, self.bot), "done")
+        self.assertEqual(self.bot.messages, [])
+        self.assertEqual(self.db.execute("SELECT result FROM jobs WHERE id = %s", (skipped.id,)).fetchone()["result"],
+                         {"skipped": "chat_unreachable"})
+
+        self.assertEqual(handle_update_job(self.db, claim_job(self.db, ("telegram_update",), 60), self.bot), "done")
+        restored = self.queue_reply("restored", GROUP_CHAT)
+        self.assertEqual(handle_reply_job(self.db, restored, self.bot), "done")
+        self.assertEqual([message["chat_id"] for message in self.bot.messages], [GROUP_CHAT])

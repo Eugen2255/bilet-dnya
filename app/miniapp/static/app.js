@@ -161,7 +161,7 @@ async function attemptDetails(id) {
         nodes.push(make("p", "", result.feedback));
     if (result.reference)
         nodes.push(make("h3", "", "Эталон"), make("p", "reference", result.reference));
-    showModal("Последний ответ", ...nodes);
+    showModal("Разбор ответа", ...nodes);
 }
 function progressView(dashboard, role) {
     const total = dashboard.tickets.length;
@@ -599,6 +599,10 @@ async function mainPage() {
     if (course?.status === "draft")
         tab = "setup";
     await render();
+    const attempt = new URLSearchParams(window.location.search).get("attempt");
+    if (attempt && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(attempt)) {
+        await attemptDetails(attempt);
+    }
 }
 void mainPage().catch(error => {
     if (main.getAttribute("aria-busy") === "true") {

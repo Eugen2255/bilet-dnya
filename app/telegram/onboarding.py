@@ -4,7 +4,7 @@ import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit
 from uuid import UUID
 
 from psycopg import Connection, Cursor
@@ -141,12 +141,21 @@ def issue_button(
     return {"inline_keyboard": [[{"text": title, "url": url}]]}
 
 
-def mini_app_button() -> dict | None:
+def mini_app_button(*, attempt_id: UUID | None = None) -> dict | None:
     value = os.getenv("MINI_APP_URL", "").strip()
-    url = urlsplit(value)
+    try:
+        url = urlsplit(value)
+    except ValueError:
+        return None
     if url.scheme != "https" or not url.hostname:
         return None
-    return {"inline_keyboard": [[{"text": "Открыть Билет дня", "web_app": {"url": value}}]]}
+    label = "Открыть Билет дня"
+    if attempt_id is not None:
+        query = [(key, item) for key, item in parse_qsl(url.query, keep_blank_values=True) if key != "attempt"]
+        query.append(("attempt", str(attempt_id)))
+        value = url._replace(query=urlencode(query)).geturl()
+        label = "Открыть полный разбор"
+    return {"inline_keyboard": [[{"text": label, "web_app": {"url": value}}]]}
 
 
 def issue_join_button(cursor: Cursor, group_id: UUID, username: str, expires_at: datetime) -> dict:

@@ -11,7 +11,8 @@ from psycopg.types.json import Jsonb
 
 from app.practice import TicketProgress, ensure_portion, plan_portion, remember_weak_attempt, study_day_count
 from app.progress import read_dashboard
-from app.schedule import day_window, open_day, save_digest, schedule_courses
+from app.queue import claim_job
+from app.schedule import day_window, handle_schedule_job, open_day, save_digest, schedule_courses
 from app.telegram.delivery import format_digest
 from test_worker import COURSE
 
@@ -122,10 +123,35 @@ class PracticeIntegrationTests(unittest.TestCase):
                 self.assertEqual(repeated, {"kind": "repeat", "ticket_id": common})
                 self.assertIsNone(day_window(course, exam, ZoneInfo("UTC")))
                 self.assertIsNone(ensure_portion(cursor, course, existing, exam, common))
-                schedule_courses(db, datetime.combine(exam, time(10), timezone.utc))
+                zone = ZoneInfo("Asia/Novosibirsk")
+                cursor.execute("UPDATE courses SET timezone = %s WHERE id = %s", (zone.key, COURSE))
+                exam_start = datetime.combine(exam, time.min, zone)
+                schedule_courses(db, exam_start - timedelta(seconds=1))
+                self.assertEqual(cursor.execute("SELECT state FROM courses WHERE id = %s", (COURSE,)).fetchone()["state"],
+                                 "active")
+                schedule_courses(db, exam_start)
+                self.assertEqual(cursor.execute("SELECT state FROM courses WHERE id = %s", (COURSE,)).fetchone()["state"],
+                                 "closed")
                 self.assertEqual(cursor.execute("""
                     SELECT count(*) AS count FROM repeats WHERE course_id = %s AND state = 'pending'
                 """, (COURSE,)).fetchone()["count"], 0)
+                self.assertEqual(read_dashboard(cursor, COURSE, late, exam_start)["tickets"][0]["lastScore"], 5)
+                last_day = exam - timedelta(days=1)
+                digest_key = f"digest:{COURSE}:{last_day}"
+                digest_id = cursor.execute("""
+                    UPDATE jobs SET run_at = clock_timestamp() WHERE key = %s RETURNING id
+                """, (digest_key,)).fetchone()["id"]
+                digest = claim_job(db, ("digest",), 30)
+                self.assertIsNotNone(digest)
+                self.assertEqual(digest.id, digest_id)
+                self.assertEqual(handle_schedule_job(db, digest, exam_start), "done")
+                day = cursor.execute("""
+                    SELECT id, summary FROM group_days WHERE course_id = %s AND day = %s
+                """, (COURSE, last_day)).fetchone()
+                self.assertIsNotNone(day["summary"])
+                self.assertIsNone(cursor.execute("""
+                    SELECT 1 FROM jobs WHERE type = 'deliver_digest' AND payload->>'groupDayId' = %s
+                """, (str(day["id"]),)).fetchone())
 
     @staticmethod
     def add_student(cursor, course, number):

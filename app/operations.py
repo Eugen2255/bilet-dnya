@@ -119,6 +119,18 @@ def purge_expired(connection: Connection, storage: Path, *, as_of: datetime | No
         cursor.execute("DELETE FROM operation_errors WHERE occurred_at <= %s - interval '7 days'", (now,))
         cursor.execute("DELETE FROM telegram_updates WHERE received_at <= %s - interval '7 days'", (now,))
         cursor.execute("""
+            DELETE FROM telegram_send_limits AS limits
+            WHERE limits.chat_id <> 0
+                AND GREATEST(limits.next_send_at, limits.last_reachable_at) <= %s - interval '7 days'
+                AND (limits.blocked_at IS NULL OR (
+                    limits.blocked_at <= %s - interval '7 days'
+                    AND NOT EXISTS (
+                        SELECT 1 FROM users WHERE dm_chat_id = limits.chat_id OR telegram_user_id = limits.chat_id
+                    )
+                    AND NOT EXISTS (SELECT 1 FROM study_groups WHERE telegram_chat_id = limits.chat_id)
+                ))
+        """, (now, now))
+        cursor.execute("""
             DELETE FROM jobs WHERE state IN ('done', 'failed', 'delivery_unknown')
                 AND COALESCE(finished_at, run_at) <= %s - interval '7 days' AND type <> 'grade'
         """, (now,))

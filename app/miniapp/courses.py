@@ -8,7 +8,7 @@ from psycopg.types.json import Jsonb
 
 from app.miniapp.errors import ApiError
 from app.practice import DAILY_LIMIT, study_day_count
-from app.schedule import local_time_utc
+from app.schedule import close_expired_course, local_time_utc
 
 
 EDITOR_ROLES = ("organizer", "teacher")
@@ -78,10 +78,10 @@ def groups_for(db: Connection, user_id: UUID) -> dict:
     items = []
     for group in groups:
         courses = db.execute("""
-            SELECT id, title, state FROM courses WHERE group_id = %s
-                AND (state IN ('active', 'paused') OR (%s AND state = 'draft') OR (%s AND state = 'closed'))
-            ORDER BY CASE WHEN state IN ('active', 'paused') THEN 0 ELSE 1 END, title, id
-        """, (group["id"], group["role"] in EDITOR_ROLES, group["role"] == "organizer")).fetchall()
+            SELECT id, title, state FROM courses WHERE group_id = %s AND (state <> 'draft' OR %s)
+            ORDER BY CASE WHEN state IN ('active', 'paused') THEN 0 WHEN state = 'draft' THEN 1 ELSE 2 END,
+                title, id
+        """, (group["id"], group["role"] in EDITOR_ROLES)).fetchall()
         active = next((str(course["id"]) for course in courses if course["state"] in {"active", "paused"}), None)
         items.append({
             "id": str(group["id"]), "title": group["title"] or "Учебная группа",
@@ -147,7 +147,7 @@ def idempotency_key(key: str) -> str:
 
 def activate(db: Connection, user_id: UUID, course_id: UUID, key: str, acknowledge: bool) -> dict:
     try:
-        with db.transaction():
+        with db.transaction(), db.cursor() as cursor:
             course = organizer_course(db, user_id, course_id)
             previous = db.execute("""
                 SELECT acknowledge_load, result FROM course_activation_requests
@@ -157,10 +157,20 @@ def activate(db: Connection, user_id: UUID, course_id: UUID, key: str, acknowled
                 if previous["acknowledge_load"] != acknowledge:
                     raise ApiError("STATE_CONFLICT", "Ключ уже использован с другими параметрами.", 409)
                 return previous["result"]
-            if course["state"] != "draft" or db.execute("""
-                SELECT 1 FROM courses WHERE group_id = %s AND state IN ('active','paused') LIMIT 1
-            """, (course["group_id"],)).fetchone():
+            if course["state"] != "draft":
                 raise ApiError("STATE_CONFLICT", "Для запуска нужен черновик и свободная группа.", 409)
+            running = cursor.execute("""
+                SELECT id, exam_date, timezone FROM courses
+                WHERE group_id = %s AND state IN ('active', 'paused') FOR NO KEY UPDATE
+            """, (course["group_id"],)).fetchone()
+            if running:
+                try:
+                    today = datetime.now(ZoneInfo(running["timezone"])).date()
+                except (ZoneInfoNotFoundError, ValueError):
+                    raise ApiError("STATE_CONFLICT", "Проверьте часовой пояс текущего курса.", 409) from None
+                if today < running["exam_date"]:
+                    raise ApiError("STATE_CONFLICT", "Для запуска нужен черновик и свободная группа.", 409)
+                close_expired_course(cursor, running["id"], running["timezone"], today)
             days = remaining_days(course)
             counts = db.execute("""
                 SELECT count(*) AS tickets, count(*) FILTER (WHERE r.state = 'approved') AS approved

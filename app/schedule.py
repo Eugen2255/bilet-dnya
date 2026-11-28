@@ -44,6 +44,20 @@ def day_window(course: dict, day: date, zone: ZoneInfo) -> DayWindow | None:
     return DayWindow(morning, evening, end) if morning < evening < end else None
 
 
+def close_expired_course(cursor: Cursor, course_id: UUID, zone_name: str, today: date) -> None:
+    """Close the expired course if its schedule still matches the selected time zone."""
+    cursor.execute("""
+        WITH closed AS (
+            UPDATE courses SET state = 'closed'
+            WHERE id = %s AND state IN ('active', 'paused')
+                AND exam_date <= %s AND timezone = %s
+            RETURNING id
+        )
+        UPDATE repeats SET state = 'closed'
+        WHERE course_id IN (SELECT id FROM closed) AND state = 'pending'
+    """, (course_id, today, zone_name))
+
+
 def schedule_courses(connection: Connection, now: datetime) -> None:
     """Persist jobs for the current and next teaching dates."""
     with connection.transaction(), connection.cursor(row_factory=dict_row) as cursor:
@@ -63,8 +77,7 @@ def schedule_courses(connection: Connection, now: datetime) -> None:
                 continue
             today = now.astimezone(zone).date()
             if today >= course["exam_date"]:
-                cursor.execute("UPDATE repeats SET state = 'closed' WHERE course_id = %s AND state = 'pending'",
-                               (course["id"],))
+                close_expired_course(cursor, course["id"], course["timezone"], today)
                 continue
             if course["state"] == "paused":
                 continue
@@ -107,7 +120,8 @@ def handle_schedule_job(connection: Connection, job: Job, now: datetime, *, dige
             FROM courses AS course JOIN study_groups ON study_groups.id = course.group_id
             WHERE course.id = %s FOR NO KEY UPDATE OF course
         """, (course_id,)).fetchone()
-        if course is None or course["state"] != "active":
+        allowed_states = ("active", "closed") if job.type == "digest" else ("active",)
+        if course is None or course["state"] not in allowed_states:
             return finish_schedule(cursor, job, {"skipped": "course_unavailable"})
 
         try:
@@ -136,7 +150,8 @@ def handle_schedule_job(connection: Connection, job: Job, now: datetime, *, dige
         if job.type == "morning":
             result = open_day(cursor, course, day, expires)
         else:
-            result = save_digest(cursor, course, day, due, expires if now < expires else None, use_model=digest_model)
+            publish_until = expires if course["state"] == "active" and now < expires else None
+            result = save_digest(cursor, course, day, due, publish_until, use_model=digest_model)
         return finish_schedule(cursor, job, result)
 
 
@@ -220,8 +235,9 @@ def save_digest(
     """, (course["id"], day, Jsonb(summary))).fetchone()
     if row is None:
         return {"skipped": "already_summarized"}
-    for ticket in summary["weakTickets"]:
-        start_repeat(cursor, course, UUID(ticket["id"]), day)
+    if course["state"] == "active":
+        for ticket in summary["weakTickets"]:
+            start_repeat(cursor, course, UUID(ticket["id"]), day)
     if expires is not None:
         enqueue_digest(cursor, summary, delivery_payload(course, day, row["id"], expires),
                        min(expires, cutoff + PUBLICATION_BUDGET), use_model=use_model)

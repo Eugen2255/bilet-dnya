@@ -24,7 +24,7 @@ def main() -> None:
         result = BotAPI(token).call("setWebhook", {
             "url": args.url,
             "secret_token": secret,
-            "allowed_updates": ["message", "callback_query"],
+            "allowed_updates": ["message", "callback_query", "my_chat_member"],
         })
     except TelegramError as exc:
         parser.exit(1, f"Webhook не установлен. {exc}\n")

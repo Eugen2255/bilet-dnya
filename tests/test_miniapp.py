@@ -3,7 +3,7 @@ import hmac
 import json
 import os
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -22,6 +22,7 @@ from app.miniapp.security import verify_init_data
 from app.queue import claim_job
 from app.rubrics.generation import handle_index_job, handle_rubric_job
 from app.telegram.jobs import handle_update_job
+from app.telegram.study import StudyEvent, accept_answer
 from app.telegram.webhook import Update, store_update
 
 
@@ -91,7 +92,13 @@ class MiniAppTests(unittest.TestCase):
             """, (self.group, user, role, "Настя" if role == "student" else "Организатор")).fetchone()["id"]
 
     def remove_fixture(self):
-        self.db.execute("DELETE FROM jobs WHERE id = ANY (%s) OR key LIKE 'telegram_reply:900000009100:%%'", (self.jobs,))
+        self.db.execute("""
+            DELETE FROM jobs WHERE id = ANY (%s) OR key LIKE 'telegram_reply:900000009100:%%'
+                OR payload->>'attemptId' IN (
+                    SELECT p.id::text FROM attempts AS p JOIN assignments AS a ON p.assignment_id = a.id
+                    WHERE a.group_id = %s
+                )
+        """, (self.jobs, self.group))
         self.db.execute("DELETE FROM telegram_updates WHERE update_id = 900000009100")
         self.db.execute("DELETE FROM study_groups WHERE id = %s", (self.group,))
         self.db.execute("DELETE FROM users WHERE telegram_user_id = ANY (%s)", ([ADMIN, STUDENT, OUTSIDER],))
@@ -213,6 +220,72 @@ class MiniAppTests(unittest.TestCase):
         self.assertEqual(organizer.get(course_path + "/dashboard").json()["group"]["responded"], 1)
         self.assertEqual(student.get(f"/v1/attempts/{attempt}").json()["covered"], ["Идентифицирует", "Уникален", "Нет NULL"])
         self.check_error(organizer.get(f"/v1/attempts/{attempt}"), 404, "NOT_FOUND")
+
+    def test_next_course_can_start_when_previous_exam_has_begun(self):
+        today = datetime.now(timezone.utc).date()
+        exam_date = today + timedelta(days=30)
+        organizer, write = self.login(ADMIN)
+        student, _ = self.login(STUDENT)
+        outsider, _ = self.login(OUTSIDER)
+
+        def ready_course(title):
+            course = self.db.execute("""
+                INSERT INTO courses (group_id, title, exam_date, timezone, morning_at, evening_at, weekdays)
+                VALUES (%s, %s, %s, 'UTC', '09:00', '20:00', '{1,2,3,4,5,6,7}') RETURNING id
+            """, (self.group, title, exam_date)).fetchone()["id"]
+            ticket = self.db.execute("""
+                INSERT INTO tickets (course_id, ordinal, question, state)
+                VALUES (%s, 1, 'Что такое ключ?', 'approved') RETURNING id
+            """, (course,)).fetchone()["id"]
+            rubric = self.db.execute("""
+                INSERT INTO rubrics (ticket_id, version, state, answer, source_status, points)
+                VALUES (%s, 1, 'approved', 'Идентификатор.', 'unsourced', %s) RETURNING id
+            """, (ticket, Jsonb([{"id": f"p{i}", "text": f"Критерий {i}"} for i in range(1, 4)]))).fetchone()["id"]
+            self.db.execute("UPDATE tickets SET approved_rubric_id = %s WHERE id = %s", (rubric, ticket))
+            return course, ticket, rubric
+
+        old, ticket, rubric = ready_course("Первый курс")
+        new, _, _ = ready_course("Следующий курс")
+        old_path = f"/v1/courses/{old}"
+        new_path = f"/v1/courses/{new}"
+        self.assertEqual(organizer.post(old_path + "/activate", headers={**write, "Idempotency-Key": "first-course"},
+                                        json={}).status_code, 200)
+        self.assertEqual(organizer.post(old_path + "/pause", headers=write).json(), {"status": "paused"})
+        activation = {**write, "Idempotency-Key": "next-course"}
+        self.check_error(organizer.post(new_path + "/activate", headers=activation, json={}), 409, "STATE_CONFLICT")
+
+        assignment_day = today - timedelta(days=1)
+        assignment = self.db.execute("""
+            INSERT INTO assignments (course_id, group_id, member_id, ticket_id, day, rubric_id, kind, state, dm_message_id)
+            VALUES (%s, %s, %s, %s, %s, %s, 'daily', 'open', 19) RETURNING id
+        """, (old, self.group, self.people[STUDENT], ticket, assignment_day, rubric)).fetchone()["id"]
+        self.db.execute("""
+            INSERT INTO repeats (course_id, group_id, ticket_id, due_day, step) VALUES (%s, %s, %s, %s, 1)
+        """, (old, self.group, ticket, assignment_day))
+        self.db.execute("UPDATE courses SET exam_date = %s WHERE id = %s", (today, old))
+
+        response = organizer.post(new_path + "/activate", headers=activation, json={})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["status"], "active")
+        self.assertEqual(organizer.get(old_path).json()["status"], "closed")
+        self.assertEqual(self.db.execute("SELECT state FROM repeats WHERE course_id = %s", (old,)).fetchone()["state"],
+                         "closed")
+        group = student.get("/v1/groups").json()["items"][0]
+        self.assertEqual(group["activeCourseId"], str(new))
+        self.assertEqual([(item["id"], item["status"]) for item in group["courses"]],
+                         [(str(new), "active"), (str(old), "closed")])
+        self.check_error(outsider.get(old_path + "/dashboard"), 404, "NOT_FOUND")
+
+        with self.db.transaction(), self.db.cursor() as cursor:
+            event = StudyEvent("answer", STUDENT, STUDENT, text="Ответ принят до экзамена.", message_id=19)
+            accept_answer(cursor, 900000009102, event, datetime.combine(assignment_day, time(23, 59), timezone.utc))
+            attempt = cursor.execute("""
+                UPDATE attempts SET status = 'graded', result = '{"score": 4}', graded_at = clock_timestamp()
+                WHERE assignment_id = %s AND status = 'submitted' RETURNING id
+            """, (assignment,)).fetchone()
+            self.assertIsNotNone(attempt)
+        self.assertEqual(student.get(old_path + "/dashboard").json()["tickets"][0]["lastScore"], 4)
+        self.assertEqual(student.get(f"/v1/attempts/{attempt['id']}").json()["score"], 4)
 
     def test_teacher_invite_is_bound_to_connected_member(self):
         organizer, write = self.login(ADMIN)

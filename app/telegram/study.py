@@ -149,12 +149,13 @@ def accept_answer(cursor: Cursor, update_id: int, event: StudyEvent, received_at
     if event.message_id is None or not 1 <= len(text) <= 1000:
         reply(cursor, update_id, event.chat_id, "Выберите билет через /today и ответьте текстом до 1000 знаков.")
         return
+    # A reply received before the exam may reach the worker after the course closes.
     assignment = cursor.execute("""
         SELECT a.id, a.state, r.state AS rubric_state FROM assignments AS a JOIN courses AS c ON c.id = a.course_id
         JOIN memberships AS m ON m.id = a.member_id JOIN users AS u ON u.id = m.user_id
         JOIN rubrics AS r ON r.id = a.rubric_id
         WHERE u.telegram_user_id = %s AND u.dm_chat_id = %s AND m.state = 'active'
-            AND a.dm_message_id = %s AND c.state IN ('active', 'paused')
+            AND a.dm_message_id = %s AND c.state IN ('active', 'paused', 'closed') AND a.day < c.exam_date
             AND a.day = (%s::timestamptz AT TIME ZONE c.timezone)::date
         ORDER BY a.id LIMIT 1 FOR NO KEY UPDATE OF a
     """, (event.user_id, event.chat_id, event.message_id, received_at)).fetchone()

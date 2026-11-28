@@ -29,6 +29,8 @@ stack exec -T worker python -m app.operations init-ledger
 stack exec -T api python -m app.telegram https://study.example.org/telegram/webhook
 ```
 
+После обновления с миграцией `010_telegram_send_limits` повторно зарегистрируйте существующий webhook. Подписка на `my_chat_member` восстанавливает доставку при разблокировке бота или его возвращении в группу.
+
 Затем добавьте бота администратором в тестовую группу, выполните `/bind`, откройте `/app` в личке и создайте тестовый курс. Секреты хранятся в `.env.deploy` с ограниченным доступом.
 
 ## Данные и наблюдаемость

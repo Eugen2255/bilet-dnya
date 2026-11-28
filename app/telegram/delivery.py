@@ -9,8 +9,11 @@ from app.ai.digest import visible_note
 from app.queue import Job
 from app.reviews import APPEAL_WINDOW
 from app.schedule import local_time_utc
-from app.telegram.onboarding import issue_join_button
+from app.telegram.onboarding import issue_join_button, mini_app_button
 from app.telegram.study import portion_forecast, portion_markup
+
+
+GRADE_TEXT_LIMIT = 4000
 
 
 @dataclass(frozen=True)
@@ -36,7 +39,7 @@ def ready_delivery(cursor: Cursor, job: Job, username: str = "") -> Outbound | N
                 SELECT u.dm_chat_id FROM attempts AS p JOIN assignments AS a ON a.id = p.assignment_id
                 JOIN memberships AS m ON m.id = a.member_id JOIN users AS u ON u.id = m.user_id
                 WHERE p.id = %s AND m.state = 'active' AND u.dm_chat_id IS NOT NULL
-                    AND p.body IS NOT NULL AND p.acknowledged_at IS NULL
+                    AND p.body IS NOT NULL AND p.acknowledged_at IS NULL AND p.delivered_at IS NULL
             """, (attempt_id,)).fetchone()
             return Outbound({"chat_id": row["dm_chat_id"], "text": "Ответ принят, проверяем."},
                             attempt_id=attempt_id, receipt="acknowledgement") if row else None
@@ -179,26 +182,34 @@ def grade_message(cursor: Cursor, attempt_id: UUID, expected_status: str | None)
             "succeeded": "Апелляция рассмотрена. Действующая оценка ниже.",
             "failed": "Повторная проверка завершилась с ошибкой. Исходная оценка сохранена.",
         }.get(row["appeal_state"])
-        payload["text"] = "\n\n".join(filter(None, (heading, format_grade(row))))[:4000]
+        score, *sections = grade_sections(row)
+        prefix = "\n\n".join(filter(None, (heading, score)))
+        text = "\n\n".join((prefix, *sections))
+        buttons = []
+        if len(text.encode("utf-16-le")) > GRADE_TEXT_LIMIT * 2:
+            detail = mini_app_button(attempt_id=attempt_id)
+            if detail:
+                buttons.extend(detail["inline_keyboard"])
+            text = short_grade(prefix, sections, has_mini_app=detail is not None)
+        payload["text"] = text
         if row["role"] == "student":
-            buttons = []
             if (not row["appeal_state"] and row["can_retry"] and row["graded_at"]
                     and row["graded_at"] <= row["read_at"] <= row["graded_at"] + APPEAL_WINDOW):
                 buttons.append([{"text": "Оспорить оценку", "callback_data": f"appeal:{attempt_id}"}])
             if row["rubric_state"] == "approved":
                 buttons.append([{"text": "Пожаловаться на эталон", "callback_data": f"report:{attempt_id}"}])
-            if buttons:
-                payload["reply_markup"] = {"inline_keyboard": buttons}
+        if buttons:
+            payload["reply_markup"] = {"inline_keyboard": buttons}
     else:
         return None
     return Outbound(payload, attempt_id=attempt_id, receipt="grade" if row["status"] == "graded" else None)
 
 
-def format_grade(row: dict) -> str:
+def grade_sections(row: dict) -> list[str]:
     result = row["result"]
     lines = [f"Билет {row['ordinal']}. Оценка {result['score']}/5"]
     if row["rubric_state"] == "revoked":
-        return lines[0] + "\n\nЭталон проверяет преподаватель. Доступные билеты — /today."
+        return [*lines, "Эталон проверяет преподаватель. Доступные билеты — /today."]
     points = {point["id"]: point["text"] for point in row["points"]}
     for title, field in (("Засчитано", "coveredIds"), ("Упущено", "missingIds")):
         entries = [points[point_id] for point_id in result.get(field, []) if point_id in points]
@@ -210,4 +221,20 @@ def format_grade(row: dict) -> str:
         lines.append(result["feedback"])
     if row["rubric_state"] == "approved":
         lines.append(f"Эталон\n{row['answer']}")
-    return "\n\n".join(lines)[:4000]
+    return lines
+
+
+def short_grade(prefix: str, sections: list[str], *, has_mini_app: bool) -> str:
+    note = ("Полный разбор доступен в приложении." if has_mini_app
+            else "Разбор сокращён из-за ограничения Telegram.")
+    # Reserve space for each section, including the reference, even if criteria are long.
+    fixed = "\n\n".join((prefix, *("" for _ in sections), note))
+    budget = (GRADE_TEXT_LIMIT * 2 - len(fixed.encode("utf-16-le"))) // len(sections)
+    previews = []
+    for section in sections:
+        encoded = section.encode("utf-16-le")
+        if len(encoded) > budget:
+            end = budget - budget % 2 - 2
+            section = encoded[:end].decode("utf-16-le", errors="ignore").rstrip() + "…"
+        previews.append(section)
+    return "\n\n".join((prefix, *previews, note))

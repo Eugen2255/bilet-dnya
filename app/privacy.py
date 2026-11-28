@@ -73,7 +73,9 @@ def erase_user(cursor: Cursor, user_id: UUID) -> bool:
     cursor.execute("""
         UPDATE telegram_updates SET payload = NULL, state = 'processed'
         WHERE payload #>> '{message,from,id}' = %s OR payload #>> '{callback_query,from,id}' = %s
-    """, (telegram_id, telegram_id))
+            OR payload #>> '{my_chat_member,from,id}' = %s
+            OR (payload #>> '{my_chat_member,chat,type}' = 'private' AND payload #>> '{my_chat_member,chat,id}' = %s)
+    """, (telegram_id, telegram_id, telegram_id, str(user["dm_chat_id"] or telegram_id)))
     cursor.execute("""
         WITH owned AS (
             SELECT a.id AS assignment_id, p.id AS attempt_id
@@ -88,6 +90,8 @@ def erase_user(cursor: Cursor, user_id: UUID) -> bool:
             FOR UPDATE OF j SKIP LOCKED)
     """, (user_id, telegram_id, str(user["dm_chat_id"] or telegram_id),
           telegram_id, str(user["dm_chat_id"] or telegram_id), user_id))
+    cursor.execute("DELETE FROM telegram_send_limits WHERE chat_id IN (%s, %s)",
+                   (user["telegram_user_id"], user["dm_chat_id"]))
     cursor.execute("""
         UPDATE group_days AS day SET summary = jsonb_set(day.summary, '{rating}', (
             SELECT COALESCE(jsonb_agg(ranked.entry ORDER BY ranked.position), '[]'::jsonb)

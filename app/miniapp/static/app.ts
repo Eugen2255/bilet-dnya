@@ -189,7 +189,7 @@ async function attemptDetails(id: string): Promise<void> {
     }
     if (result.feedback) nodes.push(make("p", "", result.feedback));
     if (result.reference) nodes.push(make("h3", "", "Эталон"), make("p", "reference", result.reference));
-    showModal("Последний ответ", ...nodes);
+    showModal("Разбор ответа", ...nodes);
 }
 
 function progressView(dashboard: Dashboard, role: Role): HTMLElement {
@@ -608,6 +608,10 @@ async function mainPage(): Promise<void> {
     const course = groups.find(group => group.id === selectedGroup)?.courses.find(item => item.id === selectedCourse);
     if (course?.status === "draft") tab = "setup";
     await render();
+    const attempt = new URLSearchParams(window.location.search).get("attempt");
+    if (attempt && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(attempt)) {
+        await attemptDetails(attempt);
+    }
 }
 
 void mainPage().catch(error => {

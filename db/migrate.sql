@@ -90,4 +90,13 @@ SELECT NOT EXISTS (
     INSERT INTO schema_migrations (version) VALUES ('009_digest_note');
 \endif
 
+SELECT NOT EXISTS (
+    SELECT FROM schema_migrations WHERE version = '010_telegram_send_limits'
+) AS apply_010_telegram_send_limits \gset
+
+\if :apply_010_telegram_send_limits
+    \ir migrations/010_telegram_send_limits.sql
+    INSERT INTO schema_migrations (version) VALUES ('010_telegram_send_limits');
+\endif
+
 COMMIT;

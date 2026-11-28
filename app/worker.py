@@ -26,7 +26,8 @@ from app.rubrics.generation import handle_index_job, handle_rubric_job
 from app.rubrics.service import INDEX_JOB_TYPE, RUBRIC_JOB_TYPE
 from app.schedule import SCHEDULE_TYPES, handle_schedule_job, schedule_courses
 from app.telegram.api import BotAPI
-from app.telegram.jobs import TELEGRAM_JOB_TYPES, handle_reply_job, handle_update_job
+from app.telegram.jobs import claim_telegram_job, handle_reply_job, handle_update_job
+from app.telegram.rate_limit import GLOBAL_INTERVAL
 
 
 logger = logging.getLogger(__name__)
@@ -50,12 +51,17 @@ def process_telegram(database_url: str, job: Job, bot: BotAPI, stop: Event) -> N
             if job.type == "telegram_update":
                 handle_update_job(connection, job, bot)
             else:
-                handle_reply_job(connection, job, bot)
+                handle_reply_job(connection, job, bot, pace=True)
             if stop.is_set():
                 return
-            job = claim_job(connection, TELEGRAM_JOB_TYPES, 90)
+            job = claim_telegram_job(connection)
             if job is None:
-                return
+                # A burst of sends can briefly use up the next shared slot.
+                if stop.wait(GLOBAL_INTERVAL.total_seconds()):
+                    return
+                job = claim_telegram_job(connection)
+                if job is None:
+                    return
 
 
 def process_preparation(database_url: str, job: Job, storage: Path, grader: Grader | None, slots: BoundedSemaphore) -> None:
@@ -160,7 +166,7 @@ def run(
                                     process_preparation, database_url, job, uploads, grader, slots,
                                 )
                         if bot is not None and telegram_pending is None:
-                            job = claim_job(connection, TELEGRAM_JOB_TYPES, 90)
+                            job = claim_telegram_job(connection)
                             if job is not None:
                                 telegram_pending = telegram_pool.submit(process_telegram, database_url, job, bot, stop)
                         stop.wait(0.05 if telegram_pending or pending else 0.25)
